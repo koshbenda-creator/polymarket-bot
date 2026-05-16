@@ -80,7 +80,10 @@ def _parse_dt(dt_str):
     if not dt_str:
         return None
     try:
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 
@@ -93,7 +96,7 @@ def _now_utc():
 # Gamma API — список активных рынков
 # ────────────────────────────────────────────────────────────────────────────
 
-def fetch_active_markets(limit=100):
+def fetch_active_markets(limit=100, max_markets=5000):
     """
     Получаем все активные рынки с пагинацией.
     limit=100 — максимум который возвращает Gamma API за один запрос.
@@ -129,6 +132,9 @@ def fetch_active_markets(limit=100):
         if len(batch) < limit:
             break
         offset += limit
+        if len(markets) >= max_markets:
+            log.info(f'[Scanner] Достигнут лимит {max_markets} рынков')
+            break
 
     log.info(f"[Scanner] Получено рынков всего: {len(markets)}")
     return markets
