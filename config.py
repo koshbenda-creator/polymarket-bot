@@ -1,31 +1,34 @@
-# config.py — все параметры бота в одном месте
+import os
 
-# === Polymarket API ===
-POLYMARKET_HOST = "https://clob.polymarket.com"
-POLYMARKET_CHAIN_ID = 137  # Polygon
+# Основные настройки сети
+POLYMARKET_HOST = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
 
-# === Параметры по умолчанию для новой стратегии ===
-DEFAULT_STRATEGY = {
-    "entry_max_prob": 0.15,      # максимальная вероятность аутсайдера для входа (15%)
-    "entry_hours_before": 24,    # за сколько часов до матча входим
-    "take_profit": 2.0,          # TP: цена выросла в 2x (200%)
-    "stop_loss": 0.50,           # SL: цена упала на 50%
-    "paper_deposit": 1000.0,     # стартовый paper баланс в USD
-    "bet_size": 50.0,            # размер одной ставки в USD
+# ── Белый список: Регулярные выражения для детекции киберспортивных игр ───────
+CYBERSPORT_GAMES = {
+    r"\bcs2\b": "CS2", r"\bcounter-strike\b": "CS2", r"\bcs:go\b": "CS2", r"\bcsgo\b": "CS2",
+    r"\bblast\b": "CS2", r"\biem\b": "CS2", r"\bpgl\b": "CS2", r"\besl\b": "CS2",
+    
+    r"\bdota\b": "Dota 2", r"\bti13\b": "Dota 2", r"\binternational\b": "Dota 2",
+    
+    r"\bvalorant\b": "Valorant", r"\bvct\b": "Valorant",
+    
+    r"\bleague of legends\b": "LoL", r"\blol\b": "LoL",
+    r"\blck\b": "LoL", r"\blpl\b": "LoL", r"\blec\b": "LoL", r"\blcs\b": "LoL", r"\bmsi\b": "LoL",
+    
+    r"\brainbow six\b": "Rainbow Six", r"\br6\b": "Rainbow Six",
+    r"\brocket league\b": "Rocket League", r"\brlcs\b": "Rocket League",
+    r"\boverwatch\b": "Overwatch", r"\bowl\b": "Overwatch",
+    r"\bcall of duty\b": "CoD", r"\bcod\b": "CoD",
+    r"\bstarcraft\b": "StarCraft", r"\bsc2\b": "StarCraft",
+    r"\bapex\b": "Apex Legends",
+    r"\bfortnite\b": "Fortnite",
 }
 
-# === Фильтры рынков по умолчанию ===
-DEFAULT_MARKET_FILTERS = {
-    "games": ["CS2", "Dota 2", "Valorant", "LoL", "Rainbow Six", "Rocket League"],
-    "market_types": ["match_winner", "map1", "map2", "map3"],  # map4/map5 выключены
-}
-
-# === Мониторинг ===
-SCANNER_INTERVAL_SECONDS = 60       # как часто ищем новые позиции
-TRACKER_INTERVAL_SECONDS = 1        # как часто проверяем цену в лайве (1 Hz)
-
-# === База данных ===
-DB_PATH = "bot.db"
-
-# === Streamlit дашборд ===
-DASHBOARD_PORT = 8501
+# ── Чёрный список: Исключаем политику, экономику, шоубиз и традиционный спорт ──
+MARKET_BLACKLIST = [
+    "election", "president", "biden", "trump", "democrat", "republican", 
+    "house of", "senate", "crypto", "bitcoin", "ethereum", "fed ", "interest rate",
+    "gdp", "inflation", "celeb", "oscar", "movie", "box office", "album", "unemployment",
+    "supreme court", "congress", "white house", "primaries", "premier league", "bundesliga",
+    "la liga", "serie a", "champions league", "world cup", "football", "soccer", "liverpool", "epl"
+]
