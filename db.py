@@ -287,21 +287,28 @@ def get_balance_history(strategy_id, days=30):
 # Мониторинг
 # ─────────────────────────────────────────────
 
-def upsert_monitored_market(market_id, event_name, game, market_type,
-                             team, current_price, match_starts_at):
-    conn = get_conn()
-    conn.execute("""
-        INSERT INTO monitored_markets
-            (market_id, event_name, game, market_type, team, current_price,
-             match_starts_at, last_checked_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(market_id) DO UPDATE SET
-            current_price   = excluded.current_price,
-            last_checked_at = excluded.last_checked_at
-    """, (market_id, event_name, game, market_type, team, current_price,
-          match_starts_at, datetime.utcnow().isoformat()))
-    conn.commit()
-    conn.close()
+def upsert_monitored_market(market_id, event_name, game, market_type, underdog_team, underdog_price, match_starts_at):
+    """Обновляет или добавляет маркет в таблицу мониторинга."""
+    conn = get_db_connection()  # или как у тебя называется функция подключения
+    cursor = conn.cursor()
+    
+    query = """
+        INSERT INTO monitored_markets (market_id, event_name, game, market_type, underdog_team, underdog_price, match_starts_at, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (market_id) 
+        DO UPDATE SET 
+            underdog_price = EXCLUDED.underdog_price,
+            updated_at = NOW();
+    """
+    try:
+        cursor.execute(query, (market_id, event_name, game, market_type, underdog_team, underdog_price, match_starts_at))
+        conn.commit()
+    except Exception as e:
+        log.error(f"[DB] Ошибка при upsert_monitored_market: {e}")
+        conn.rollback()
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def get_monitored_markets():
