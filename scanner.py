@@ -26,7 +26,6 @@ def _detect_game(market_title: str) -> str | None:
     """Определяет киберспортивную дисциплину по названию рынка (защита регулярками)."""
     title_lower = market_title.lower()
     
-    # Жесткий фикс, чтобы Международный суд и Нобелевка не детектились как Дота
     if "nobel" in title_lower or "court of justice" in title_lower:
         return None
         
@@ -53,11 +52,31 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает активные маркеты Polymarket с глубоким просмотром страниц (до 1000 штук)."""
+    """Скачивает активные маркеты Polymarket напрямую из категории Киберспорт (esports)."""
     try:
         all_markets = []
-        
-        for offset in [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]:
+
+        # 1. Тянем рынки целенаправленно из киберспортивной секции Polymarket
+        try:
+            resp = requests.get(
+                f"{GAMMA_API}/events",
+                params={
+                    "slug": "esports",
+                    "closed": "false",
+                },
+                timeout=15
+            )
+            if resp.status_code == 200:
+                events = resp.json()
+                for event in events:
+                    markets = event.get("markets", [])
+                    all_markets.extend(markets)
+                log.info(f"[Scanner] Получено {len(all_markets)} рынков из целевой категории 'esports'.")
+        except Exception as esports_err:
+            log.error(f"[Scanner] Ошибка запроса категории esports: {esports_err}")
+
+        # 2. Подстраховка: берем еще первые 300 общих рынков
+        for offset in [0, 100, 200]:
             try:
                 resp = requests.get(
                     f"{GAMMA_API}/markets",
@@ -70,19 +89,17 @@ def fetch_gamma_markets() -> list[dict]:
                     },
                     timeout=15
                 )
-                resp.raise_for_status()
-                chunk = resp.json()
-                if not chunk:
-                    break
-                all_markets.extend(chunk)
-            except Exception as page_err:
-                log.error(f"[Scanner] Ошибка загрузки страницы с offset {offset}: {page_err}")
+                if resp.status_code == 200:
+                    all_markets.extend(resp.json())
+            except Exception:
                 continue
-        
-        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} активных рынков для анализа.")
+
+        # Фильтруем дубликаты по conditionId
+        unique_markets = {m["conditionId"]: m for m in all_markets if m.get("conditionId")}.values()
+        log.info(f"[Scanner] Всего после объединения источников собрано {len(unique_markets)} уникальных рынков.")
 
         valid_markets = []
-        for m in all_markets:
+        for m in unique_markets:
             if not m.get("clobTokenIds") or not m.get("outcomePrices"):
                 continue
                 
@@ -92,7 +109,7 @@ def fetch_gamma_markets() -> list[dict]:
             if not game:
                 continue
 
-            log.info(f"[MATCH-DEBUG] Найдено киберспортивное событие: '{title}' -> {game}")
+            log.info(f"[MATCH-DEBUG] Найдено реальное киберспортивное событие: '{title}' -> {game}")
 
             start_dt = None
             if m.get("gameStartTime"):
@@ -114,7 +131,7 @@ def fetch_gamma_markets() -> list[dict]:
             
         return valid_markets
     except Exception as e:
-        log.error(f"[Scanner] Ошибка при получении маркетов с Gamma API: {e}")
+        log.error(f"[Scanner] Глобальная ошибка fetch_gamma_markets: {e}")
         return []
 
 
@@ -130,7 +147,6 @@ def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
     for i in range(0, len(unique_tokens), chunk_size):
         chunk = unique_tokens[i:i + chunk_size]
         try:
-            # Правильный формат запроса цен для CLOB API Polymarket
             resp = requests.get(
                 f"{CLOB_API}/prices",
                 params={"token_ids": json.dumps(chunk)},
@@ -235,8 +251,6 @@ def scan_markets():
 
             start_at = market["_start"]
             if start_at:
-                if start_at <= now_utc:
-                    log.info(f"[MATCH-DEBUG] Матч уже идет (LIVE): '{market['question']}'")
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
