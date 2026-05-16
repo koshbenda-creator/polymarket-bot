@@ -12,23 +12,25 @@ POLYMARKET_HOST = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
 
 # ── БЕЛЫЙ СПИСОК (КИБЕРСПОРТ) ───────────────────────────────────────────────
 CYBERSPORT_GAMES = {
+    # CS2 / CS:GO
     r"\bcs2\b": "CS2", r"\bcounter-strike\b": "CS2", r"\bcs:go\b": "CS2", r"\bcsgo\b": "CS2",
     r"\bblast\b": "CS2", r"\biem\b": "CS2", r"\bpgl\b": "CS2", r"\besl\b": "CS2",
     
+    # Dota 2
     r"\bdota\b": "Dota 2", r"\bti13\b": "Dota 2", r"\binternational\b": "Dota 2",
+    r"\briyadh\b": "Dota 2",
     
+    # Valorant & LoL
     r"\bvalorant\b": "Valorant", r"\bvct\b": "Valorant",
-    
     r"\bleague of legends\b": "LoL", r"\blol\b": "LoL",
     r"\blck\b": "LoL", r"\blpl\b": "LoL", r"\blec\b": "LoL", r"\blcs\b": "LoL", r"\bmsi\b": "LoL",
     
-    r"\brainbow six\b": "Rainbow Six", r"\br6\b": "Rainbow Six",
-    r"\brocket league\b": "Rocket League", r"\brlcs\b": "Rocket League",
-    r"\boverwatch\b": "Overwatch", r"\bowl\b": "Overwatch",
-    r"\bcall of duty\b": "CoD", r"\bcod\b": "CoD",
-    r"\bstarcraft\b": "StarCraft", r"\bsc2\b": "StarCraft",
-    r"\bapex\b": "Apex Legends",
-    r"\bfortnite\b": "Fortnite",
+    # Общие теги топовых команд (если в названии рынка только команды)
+    r"\bfaeze\b|\bnavi\b|\bnatus vincere\b|\bvirtus\.pro\b|\bvp\b": "CS2",
+    r"\bspirit\b|\bfalcons\b|\bg2\b|\bteam liquid\b|\bliquid\b": "Dota 2",
+    r"\bvitality\b|\bmouz\b|\bheroic\b|\bastralis\b|\bcoinflippers\b": "CS2",
+    r"\bbetboom\b|\bgladiators\b|\btundra\b|\bog\b|\bxtreme\b": "Dota 2",
+    r"\bt1\b|\bgen\.g\b|\bfnatic\b|\bcloud9\b|\bc9\b|\bsentinels\b": "LoL",
 }
 
 # ── ЧЁРНЫЙ СПИСОК (ФИЛЬТРАЦИЯ МУСОРА) ────────────────────────────────────────
