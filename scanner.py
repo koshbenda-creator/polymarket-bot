@@ -22,20 +22,27 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 # ── Ключевые слова для определения киберспорта ──────────────────────────────
 ESPORTS_KEYWORDS = [
     "cs2", "counter-strike", "dota", "valorant", "league of legends", "lol",
-    "rainbow six", "r6", "rocket league", "overwatch", "call of duty", "cod",
+    "rainbow six", "r6", "rocket league", "overwatch", "call of duty",
     "starcraft", "apex", "fortnite", "pubg", "esport", "esports",
+    "lck", "lpl", "lec", "lcs", "cblol", "champions tour", # Теги для LoL/Valorant лиг
+    "iem ", "esl ", "pgl ", "blast premier", "major",     # Теги для CS/Dota турниров
 ]
 
 # ── Маппинг: ключевое слово → нормализованное название игры ─────────────────
 GAME_MAP = {
     "cs2": "CS2", "counter-strike": "CS2",
+    "blast premier": "CS2", "iem ": "CS2",
+    
     "dota": "Dota 2",
-    "valorant": "Valorant",
+    "valorant": "Valorant", "champions tour": "Valorant",
+    
     "league of legends": "LoL", "lol": "LoL",
+    "lck": "LoL", "lpl": "LoL", "lec": "LoL", "lcs": "LoL", "cblol": "LoL",
+    
     "rainbow six": "Rainbow Six", "r6": "Rainbow Six",
     "rocket league": "Rocket League",
     "overwatch": "Overwatch",
-    "call of duty": "CoD", "cod": "CoD",
+    "call of duty": "CoD", # убрали короткий "cod", чтобы не путать с Cody Gakpo
     "starcraft": "StarCraft",
     "apex": "Apex Legends",
     "fortnite": "Fortnite",
