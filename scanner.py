@@ -1,11 +1,10 @@
-# scanner.py — поиск аутсайдеров на Polymarket (С глубоким сканированием)
+# scanner.py — поиск аутсайдеров на Polymarket
 #
 # Использует два API Polymarket:
 #   Gamma API  — метаданные рынков (название, теги, время)
 #   CLOB API   — текущие цены (order book)
 
 import logging
-import re
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -22,39 +21,48 @@ log = logging.getLogger(__name__)
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = POLYMARKET_HOST  # https://clob.polymarket.com
 
-# ── Ключевые слова для точного определения игры ─────────────────────────────
+# ── Белый список: Ключевые слова для определения игры ───────────────────────
 GAME_MAP = {
     "cs2": "CS2", "counter-strike": "CS2", "cs:go": "CS2", "csgo": "CS2",
-    "blast premier": "CS2", "iem ": "CS2", "pgl ": "CS2", "esl": "CS2",
+    "blast": "CS2", "iem": "CS2", "pgl": "CS2", "esl": "CS2", "epl": "CS2",
     
-    "dota": "Dota 2",
-    "valorant": "Valorant", "champions tour": "Valorant", "vct": "Valorant",
+    "dota": "Dota 2", "ti13": "Dota 2", "international": "Dota 2",
+    
+    "valorant": "Valorant", "vct": "Valorant", "champions tour": "Valorant",
     
     "league of legends": "LoL", "lol": "LoL",
-    "lck": "LoL", "lpl": "LoL", "lec": "LoL", "lcs": "LoL", "cblol": "LoL",
+    "lck": "LoL", "lpl": "LoL", "lec": "LoL", "lcs": "LoL", "cblol": "LoL", "msi": "LoL",
     
-    "rainbow six": "Rainbow Six", "r6": "Rainbow Six",
-    "rocket league": "Rocket League",
-    "overwatch": "Overwatch",
-    "call of duty": "CoD", "cod": "CoD",
-    "starcraft": "StarCraft",
+    "rainbow six": "Rainbow Six", "r6": "Rainbow Six", "invitational": "Rainbow Six",
+    "rocket league": "Rocket League", "rlcs": "Rocket League",
+    "overwatch": "Overwatch", "owl": "Overwatch",
+    "call of duty": "CoD", "cod": "CoD", "cdo": "CoD",
+    "starcraft": "StarCraft", "sc2": "StarCraft",
     "apex": "Apex Legends",
     "fortnite": "Fortnite",
 }
 
+# ── Чёрный список: Исключает политику, экономику и поп-культуру ─────────────
+BLACKLIST = [
+    "election", "president", "biden", "trump", "democrat", "republican", 
+    "house of", "senate", "crypto", "bitcoin", "ethereum", "fed ", "interest rate",
+    "gdp", "inflation", "celeb", "oscar", "movie", "box office", "album", "unemployment",
+    "supreme court", "congress", "white house", "primaries"
+]
+
 
 def _detect_game(market_title: str) -> str | None:
-    """Определяет конкретную киберспортивную дисциплину по названию рынка."""
+    """Определяет киберспортивную дисциплину по названию рынка с защитой от политики."""
     title_lower = market_title.lower()
     
+    # 1. Если есть хоть одно слово из черного списка — это НЕ киберспорт
+    if any(bad_word in title_lower for bad_word in BLACKLIST):
+        return None
+        
+    # 2. Ищем совпадение по ключевым словам игр
     for keyword, game_name in GAME_MAP.items():
-        if " " in keyword or len(keyword) > 4:
-            if keyword in title_lower:
-                return game_name
-        else:
-            # Короткие теги ищем строго как отдельные слова
-            if re.search(r'\b' + re.escape(keyword) + r'\b', title_lower):
-                return game_name
+        if keyword in title_lower:
+            return game_name
                 
     return None
 
@@ -72,18 +80,18 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает абсолютно все активные маркеты Polymarket, пробивая лимиты."""
+    """Скачивает активные маркеты Polymarket, пробивая пагинацию."""
     try:
         all_markets = []
         
-        # Делаем запросы по страницам, чтобы вытащить до 1000 рынков и найти киберспорт
+        # Сканируем первые 5 страниц (до 500 рынков)
         for offset in [0, 100, 200, 300, 400]:
             resp = requests.get(
                 f"{GAMMA_API}/markets",
                 params={
                     "closed": "false",
                     "resolved": "false",
-                    "active": "true",  # Только живые рынки, где идут торги
+                    "active": "true",
                     "limit": 100,
                     "offset": offset,
                 },
@@ -103,16 +111,9 @@ def fetch_gamma_markets() -> list[dict]:
                 continue
                 
             title = m.get("question", "")
-            
-            # ВРЕМЕННЫЙ ОТЛАДОЧНЫЙ ЛОГ: смотрим, видит ли бот строки в принципе
-            # Если в названии есть намек на игру, выведем его в лог
-            title_lower = title.lower()
-            if any(k in title_lower for k in ["vs", "match", "winner", "map", "team"]):
-                log.info(f"[RAW-MARKET-DEBUG] Потенциальный матч в выдаче: '{title}'")
-
             game = _detect_game(title)
             if not game:
-                continue  # Политика отсекается здесь
+                continue  # Фильтруем здесь
 
             start_dt = None
             if m.get("gameStartTime"):
@@ -234,8 +235,7 @@ def scan_markets():
             game = market["_game"]
             mtype = market["_mtype"]
 
-            # Выводим инфу, что нашли игру, до фильтров стратегии
-            log.info(f"[MATCH-DEBUG] Бот нашел киберспортивный маркет: '{market['question']}' | Игра: {game} | Тип: {mtype}")
+            log.info(f"[MATCH-DEBUG] Найден подходящий маркет: '{market['question']}' | Игра: {game} | Тип: {mtype}")
 
             if game.lower() not in allowed_games:
                 continue
@@ -245,11 +245,11 @@ def scan_markets():
             start_at = market["_start"]
             if start_at:
                 if start_at <= now_utc:
-                    log.info(f"[MATCH-DEBUG] Матч идет в ЛАЙВЕ: '{market['question']}'")
+                    log.info(f"[MATCH-DEBUG] Матч уже идет (LIVE): '{market['question']}'")
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
-            # Обновление мониторинга в БД
+            # Обновляем таблицу мониторинга в БД для дашборда
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
                 upsert_monitored_market(
@@ -283,7 +283,7 @@ def scan_markets():
             open_market_ids.add(market_id)
             entered += 1
             log.info(
-                f"[Scanner] ✅ Вход в позицию: {market.get('question', '')} | "
+                f"[Scanner] ✅ Открыта сделка: {market.get('question', '')} | "
                 f"{underdog['team']} @ {underdog['price']*100:.1f}% | trade #{trade_id}"
             )
 
