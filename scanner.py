@@ -1,4 +1,4 @@
-# scanner.py — поиск аутсайдеров на Polymarket
+# scanner.py — поиск аутсайдеров на Polymarket с агрессивным дебагом фильтрации
 #
 # Использует два API Polymarket:
 #   Gamma API  — метаданные рынков (название, теги, время)
@@ -54,7 +54,7 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает активные маркеты Polymarket с Gamma API."""
+    """Скачивает активные маркеты Polymarket с Gamma API и агрессивно логирует подозреваемых."""
     try:
         all_markets = []
         
@@ -80,22 +80,27 @@ def fetch_gamma_markets() -> list[dict]:
 
         valid_markets = []
         for m in all_markets:
-            if not m.get("clobTokenIds") or not m.get("outcomePrices"):
-                continue
-                
             title = m.get("question", "")
+            title_lower = title.lower()
+            
+            # Маркер подозрения на киберспорт (чтобы не спамить политикой)
+            is_esport_suspect = any(x in title_lower for x in ["vs", "map", "esl", "pgl", "iem", "dota", "cs2", "valorant", "major"])
+            
+            if is_esport_suspect:
+                if not m.get("clobTokenIds"):
+                    log.info(f"[MATCH-DEBUG] СКИПНУТ (нет clobTokenIds): '{title}'")
+                    continue
+                if not m.get("outcomePrices"):
+                    log.info(f"[MATCH-DEBUG] СКИПНУТ (нет outcomePrices): '{title}'")
+                    continue
+            else:
+                if not m.get("clobTokenIds") or not m.get("outcomePrices"):
+                    continue
+
             game = _detect_game(title)
             
-            # ── ВРЕМЕННЫЙ ДЕБАГ ТЕКСТА РЫНКОВ ───────────────────────────────────
-            if m.get("gameStartTime"):
-                try:
-                    start_dt = datetime.fromisoformat(m["gameStartTime"].replace("Z", "+00:00"))
-                    # Логируем всё, что идет сейчас (LIVE) или начнется в ближайшие 6 часов
-                    if start_dt and start_dt <= datetime.now(timezone.utc) + timedelta(hours=6):
-                        log.info(f"[MATCH-DEBUG] Сканнер видит live-рынок на Polymarket: '{title}' | Определил как игру: {game}")
-                except Exception:
-                    pass
-            # ────────────────────────────────────────────────────────────────────
+            if is_esport_suspect:
+                log.info(f"[MATCH-DEBUG] Прошёл валидацию структуры: '{title}' | Распознан как игра: {game}")
 
             if not game:
                 continue
