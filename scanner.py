@@ -1,7 +1,7 @@
-# scanner.py — поиск аутсайдеров на Polymarket
+# scanner.py — поиск аутсайдеров на Polymarket (До и во время матча)
 #
 # Использует два API Polymarket:
-#   Gamma API  — метаданные рынков (название, теги, время) с фильтрацией по Gaming
+#   Gamma API  — метаданные рынков (название, теги, время)
 #   CLOB API   — текущие цены (order book)
 
 import logging
@@ -23,7 +23,6 @@ GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = POLYMARKET_HOST  # https://clob.polymarket.com
 
 # ── Ключевые слова для точного определения игры ─────────────────────────────
-# Строго синхронизировано со списком в config.py и dashboard.py
 GAME_MAP = {
     "cs2": "CS2", "counter-strike": "CS2",
     "blast premier": "CS2", "iem ": "CS2", "pgl ": "CS2",
@@ -37,7 +36,7 @@ GAME_MAP = {
     "rainbow six": "Rainbow Six", "r6": "Rainbow Six",
     "rocket league": "Rocket League",
     "overwatch": "Overwatch",
-    "call of duty": "CoD",  # Защита от Cody Gakpo: ищем только полную фразу
+    "call of duty": "CoD",
     "starcraft": "StarCraft",
     "apex": "Apex Legends",
     "fortnite": "Fortnite",
@@ -49,12 +48,11 @@ def _detect_game(market_title: str) -> str | None:
     title_lower = market_title.lower()
     
     for keyword, game_name in GAME_MAP.items():
-        # Если ключевое слово длинное или содержит пробелы, проверяем обычным вхождением
         if " " in keyword or len(keyword) > 4:
             if keyword in title_lower:
                 return game_name
         else:
-            # Короткие теги (lol, lck, cs2, r6) ищем строго как отдельные слова (\b)
+            # Короткие теги (lol, cs2, r6) ищем строго как отдельные слова
             if re.search(r'\b' + re.escape(keyword) + r'\b', title_lower):
                 return game_name
                 
@@ -74,49 +72,37 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает активные маркеты, фильтруя их по категории Gaming на стороне API."""
+    """Скачивает активные маркеты Polymarket без жестких тегов, чтобы не пропускать матчи."""
     try:
-        # Запрашиваем только маркеты из категории Gaming/Esports
-        # Также запрашиваем только активные (not resolved) и не закрытые (open) рынки
+        # Запрашиваем широкую выборку (500 рынков), чтобы туда точно попал весь киберспорт
         resp = requests.get(
             f"{GAMMA_API}/markets",
             params={
-                "tag_slug": "gaming",  # Фильтрация на уровне API Polymarket
                 "closed": "false",
                 "resolved": "false",
-                "limit": 100,
+                "limit": 500,
             },
             timeout=15
         )
         resp.raise_for_status()
         markets = resp.json()
         
-        # На всякий случай делаем fallback на тег esports, если по gaming пусто
-        if not markets:
-            resp = requests.get(
-                f"{GAMMA_API}/markets",
-                params={"tag_slug": "esports", "closed": "false", "resolved": "false", "limit": 100},
-                timeout=15
-            )
-            resp.raise_for_status()
-            markets = resp.json()
+        log.info(f"[Scanner] Gamma API вернул {len(markets)} активных рынков для анализа.")
 
         valid_markets = []
         for m in markets:
-            # Базовые проверки на валидность полей API
             if not m.get("clobTokenIds") or not m.get("outcomePrices"):
                 continue
                 
             title = m.get("question", "")
             game = _detect_game(title)
             if not game:
-                continue  # Пропускаем, если игра не распознана нашими фильтрами
+                continue  # Политика и экономика отсекаются здесь
 
-            # Парсинг даты начала матка
+            # Парсинг даты начала матча
             start_dt = None
             if m.get("gameStartTime"):
                 try:
-                    # Пример: 2026-05-16T22:00:00Z
                     start_dt = datetime.fromisoformat(m["gameStartTime"].replace("Z", "+00:00"))
                 except Exception:
                     pass
@@ -144,7 +130,6 @@ def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
     if not token_ids:
         return prices
     try:
-        # Пакетный запрос цен, чтобы не спамить API
         resp = requests.get(
             f"{CLOB_API}/prices",
             params={"token_ids": token_ids},
@@ -152,7 +137,6 @@ def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
         )
         resp.raise_for_status()
         data = resp.json()
-        # API возвращает dict { token_id: price_string }
         for t_id, p_str in data.items():
             try:
                 prices[t_id] = float(p_str)
@@ -169,9 +153,8 @@ def find_underdog(market: dict, max_prob: float, prices_cache: dict) -> dict | N
     tokens = market["clob_token_ids"]
     
     if len(outcomes) != 2 or len(tokens) != 2:
-        return None  # Работаем только с бинарными исходами (П1 / П2)
+        return None
 
-    # Берём live-цену из кэша CLOB, если её нет — используем базовую из Gamma
     p0 = prices_cache.get(tokens[0], None)
     p1 = prices_cache.get(tokens[1], None)
     
@@ -182,7 +165,6 @@ def find_underdog(market: dict, max_prob: float, prices_cache: dict) -> dict | N
         except (IndexError, ValueError, TypeError):
             return None
 
-    # Проверяем условия для каждого исхода
     if 0.01 < p0 <= max_prob:
         return {"team": outcomes[0], "price": p0, "token_id": tokens[0]}
     if 0.01 < p1 <= max_prob:
@@ -192,7 +174,7 @@ def find_underdog(market: dict, max_prob: float, prices_cache: dict) -> dict | N
 
 
 def scan_markets():
-    """Основной рабочий цикл сканера."""
+    """Основной рабочий цикл сканера с поддержкой live-матчей."""
     log.info("[Scanner] Запуск сканирования киберспортивных рынков...")
     
     strategies = get_all_strategies()
@@ -201,28 +183,22 @@ def scan_markets():
         log.info("[Scanner] Нет активных стратегий. Сканирование пропущено.")
         return
 
-    # 1. Скачиваем отфильтрованные киберспортивные рынки через Gamma API
     markets = fetch_gamma_markets()
-    log.info(f"[Scanner] Получено {len(markets)} потенциальных киберспортивных рынков.")
+    log.info(f"[Scanner] После фильтрации по ключевым словам осталось {len(markets)} киберспортивных рынков.")
 
     if not markets:
         return
 
-    # 2. Собираем все Token ID для live-цен
     all_token_ids = []
     for m in markets:
         all_token_ids.extend(m["clob_token_ids"])
         
-    # Кэшируем live-цены из стакана (CLOB)
     prices_cache = fetch_clob_prices(all_token_ids)
-
     now_utc = datetime.now(timezone.utc)
 
-    # 3. Обработка рынков для каждой стратегии
     for strategy in active_strategies:
         strategy_id = strategy["id"]
         
-        # Распаковываем конфиги из БД
         import json
         params = json.loads(strategy["params"])
         filters = json.loads(strategy["filters"])
@@ -244,54 +220,51 @@ def scan_markets():
             game = market["_game"]
             mtype = market["_mtype"]
 
-            # Валидация по фильтрам стратегии
+            # 1. Проверка по фильтрам игры и типа маркета
             if game.lower() not in allowed_games:
                 continue
             if mtype not in allowed_mtypes:
                 continue
 
-            # Проверка времени начала матча
+            # 2. Проверка времени (Теперь ЛАЙВ разрешен!)
             start_at = market["_start"]
             if start_at:
-                # Если матч уже начался или прошел
+                # Если матч уже идет (лайв), выводим отладочный лог, но НЕ скипаем его!
                 if start_at <= now_utc:
-                    log.info(f"[MATCH-DEBUG] Матч: '{market['question']}' | Игра: {game} | Статус: УЖЕ ИДЕТ/ПРОШЕЛ")
-                    continue
-                # Если до матча осталось больше времени, чем разрешено стратегией
+                    log.info(f"[MATCH-DEBUG] Обработка LIVE-матча: '{market['question']}' | Игра: {game}")
+                
+                # Если матч начнется слишком нескоро (например, через 3 дня), скипаем
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
-            else:
-                # Если у рынка вообще нет даты начала — это долгосрочный аутрайт, скипаем
-                continue
 
-            # Добавляем или обновляем рынок в таблице мониторинга дашборда
+            # Добавляем/обновляем в дашборде
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
                 upsert_monitored_market(
                     market_id      = market_id,
                     event_name     = market.get("question", ""),
-                    game           = game,              # Сохраняется красиво (LoL, CS2)
+                    game           = game,
                     market_type    = mtype,
                     underdog_team  = any_underdog["team"],
                     underdog_price = any_underdog["price"],
                     match_starts_at= market["_start"].isoformat() if market["_start"] else None,
                 )
 
-            # Если по этому рынку уже открыта сделка — дублировать нельзя
+            # Защита от дублей сделок
             if market_id in open_market_ids:
                 continue
 
-            # Ищем конкретного аутсайдера под жесткий порог вероятности (например, < 15%)
+            # Проверка условий на жесткий вход по коэффициенту (< 15%)
             underdog = find_underdog(market, max_prob=max_prob, prices_cache=prices_cache)
             if not underdog:
                 continue
 
-            # Открываем сделку (симуляция покупки)
+            # Открываем сделку
             trade_id = open_trade(
                 strategy_id    = strategy_id,
                 market_id      = market_id,
                 event_name     = market.get("question", ""),
-                game           = game,              # Сохраняется красиво (LoL, CS2)
+                game           = game,
                 market_type    = mtype,
                 team           = underdog["team"],
                 entry_price    = underdog["price"],
@@ -301,9 +274,8 @@ def scan_markets():
             open_market_ids.add(market_id)
             entered += 1
             log.info(
-                f"[Scanner] ✅ {market.get('question', '')} | "
-                f"{underdog['team']} @ {underdog['price']*100:.1f}% | "
-                f"trade #{trade_id}"
+                f"[Scanner] ✅ Зафиксирован вход! {market.get('question', '')} | "
+                f"{underdog['team']} @ {underdog['price']*100:.1f}% | trade #{trade_id}"
             )
 
         if entered > 0:
