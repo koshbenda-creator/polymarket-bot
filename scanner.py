@@ -2,7 +2,7 @@
 #
 # Использует два API Polymarket:
 #   Gamma API  — метаданные рынков (название, теги, время)
-#   CLOB API   — точные live-цены (order book) через POST-запросы
+#   CLOB API   — точные live-цены (order book) чанками через GET
 
 import logging
 import json
@@ -26,7 +26,7 @@ CLOB_API  = POLYMARKET_HOST  # https://clob.polymarket.com
 # ── Белый список: Точные ключевые слова с границами слов ────────────────────
 GAME_MAP = {
     r"\bcs2\b": "CS2", r"\bcounter-strike\b": "CS2", r"\bcs:go\b": "CS2", r"\bcsgo\b": "CS2",
-    r"\bblast\b": "CS2", r"\biem\b": "CS2", r"\bpgl\b": "CS2", r"\besl\b": "CS2", r"\bepl\b": "CS2",
+    r"\bblast\b": "CS2", r"\biem\b": "CS2", r"\bpgl\b": "CS2", r"\besl\b": "CS2",
     
     r"\bdota\b": "Dota 2", r"\bti13\b": "Dota 2", r"\binternational\b": "Dota 2",
     
@@ -50,7 +50,7 @@ BLACKLIST = [
     "house of", "senate", "crypto", "bitcoin", "ethereum", "fed ", "interest rate",
     "gdp", "inflation", "celeb", "oscar", "movie", "box office", "album", "unemployment",
     "supreme court", "congress", "white house", "primaries", "premier league", "bundesliga",
-    "la liga", "serie a", "champions league", "world cup", "football", "soccer"
+    "la liga", "serie a", "champions league", "world cup", "football", "soccer", "liverpool", "epl"
 ]
 
 
@@ -140,33 +140,36 @@ def fetch_gamma_markets() -> list[dict]:
 
 
 def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
-    """Получает точные цены из CLOB API через POST запрос, оборачивая в объект token_ids."""
+    """Получает точные цены из CLOB API через GET микро-пачками по 10 штук."""
     prices = {}
     if not token_ids:
         return prices
         
     unique_tokens = list(set(token_ids))
+    chunk_size = 10  # Маленький размер пачки, чтобы URL не был слишком длинным
     
-    try:
-        # Polymarket CLOB API ожидает структуру {"token_ids": [...]}
-        resp = requests.post(
-            f"{CLOB_API}/prices",
-            json={"token_ids": unique_tokens},
-            timeout=12
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        
-        # Ответ приходит в виде {"0x...": "0.12", "0x...": "0.88"}
-        if isinstance(data, dict):
-            for t_id, p_str in data.items():
-                try:
-                    prices[t_id] = float(p_str)
-                except (ValueError, TypeError):
-                    pass
-    except Exception as e:
-        log.error(f"[Scanner] Ошибка отправки POST в CLOB API цен: {e}")
-        
+    for i in range(0, len(unique_tokens), chunk_size):
+        chunk = unique_tokens[i:i + chunk_size]
+        try:
+            # Формируем правильный query string: ?token_ids=A&token_ids=B
+            params = [("token_ids", t_id) for t_id in chunk]
+            resp = requests.get(
+                f"{CLOB_API}/prices",
+                params=params,
+                timeout=12
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if isinstance(data, dict):
+                for t_id, p_str in data.items():
+                    try:
+                        prices[t_id] = float(p_str)
+                    except (ValueError, TypeError):
+                        pass
+        except Exception as e:
+            log.error(f"[Scanner] Ошибка пачки CLOB API цен: {e}")
+            
     return prices
 
 
@@ -261,19 +264,21 @@ def scan_markets():
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
-            # Ищем любого аутсайдера (до 100%), чтобы закинуть в таблицу мониторинга
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
-                # ВАЖНО: строго под сигнатуру db.py (underdog_team, underdog_price)
-                upsert_monitored_market(
-                    market_id       = market_id,
-                    event_name      = market.get("question", ""),
-                    game            = game,
-                    market_type     = mtype,
-                    underdog_team   = any_underdog["team"],
-                    underdog_price  = any_underdog["price"],
-                    match_starts_at = market["_start"].isoformat() if market["_start"] else None,
-                )
+                # Используем позиционные аргументы БЕЗ имен (ключей), чтобы избежать несовпадений с db.py
+                try:
+                    upsert_monitored_market(
+                        market_id,
+                        market.get("question", ""),
+                        game,
+                        mtype,
+                        any_underdog["team"],
+                        any_underdog["price"],
+                        market["_start"].isoformat() if market["_start"] else None
+                    )
+                except Exception as db_err:
+                    log.error(f"[Scanner] Ошибка записи в таблицу мониторинга: {db_err}")
 
             if market_id in open_market_ids:
                 continue
