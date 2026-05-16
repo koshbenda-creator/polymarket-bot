@@ -1,9 +1,4 @@
-# scanner.py — поиск аутсайдеров на Polymarket с агрессивным дебагом фильтрации
-#
-# Использует два API Polymarket:
-#   Gamma API  — метаданные рынков (название, теги, время)
-#   CLOB API   — точные live-цены (order book) микро-пачками через GET
-
+# scanner.py — целевой поиск киберспортивных рынков через теги Gamma API
 import logging
 import json
 import requests
@@ -54,11 +49,31 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает активные маркеты Polymarket с Gamma API и агрессивно логирует подозреваемых."""
+    """Скачивает маркеты Polymarket, целенаправленно запрашивая категорию Esports."""
     try:
         all_markets = []
         
-        for offset in [0, 100, 200, 300, 400]:
+        # Делаем два запроса: один чисто по тегу Esports, второй — общий (на случай если тег забыли поставить)
+        # Запрос 1: Целевой киберспорт
+        try:
+            resp = requests.get(
+                f"{GAMMA_API}/markets",
+                params={
+                    "closed": "false",
+                    "resolved": "false",
+                    "active": "true",
+                    "limit": 100,
+                    "tag": "Esports"  # Фильтр самого Polymarket на уровне базы данных
+                },
+                timeout=15
+            )
+            if resp.status_code == 200:
+                all_markets.extend(resp.json())
+        except Exception as tag_err:
+            log.error(f"[Scanner] Не удалось получить рынки по тегу Esports: {tag_err}")
+
+        # Запрос 2: Берем еще 200 общих рынков с начала списка для подстраховки
+        for offset in [0, 100]:
             resp = requests.get(
                 f"{GAMMA_API}/markets",
                 params={
@@ -75,32 +90,27 @@ def fetch_gamma_markets() -> list[dict]:
             if not chunk:
                 break
             all_markets.extend(chunk)
+            
+        # Убираем дубликаты, если рынки пересеклись
+        unique_markets = {m["conditionId"]: m for m in all_markets if m.get("conditionId")}.values()
         
-        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} активных рынков для анализа.")
+        log.info(f"[Scanner] Gamma API суммарно вернул {len(unique_markets)} активных рынков после мёрджа.")
 
         valid_markets = []
-        for m in all_markets:
+        for m in unique_markets:
             title = m.get("question", "")
             title_lower = title.lower()
             
-            # Маркер подозрения на киберспорт (чтобы не спамить политикой)
-            is_esport_suspect = any(x in title_lower for x in ["vs", "map", "esl", "pgl", "iem", "dota", "cs2", "valorant", "major"])
-            
-            if is_esport_suspect:
-                if not m.get("clobTokenIds"):
-                    log.info(f"[MATCH-DEBUG] СКИПНУТ (нет clobTokenIds): '{title}'")
-                    continue
-                if not m.get("outcomePrices"):
-                    log.info(f"[MATCH-DEBUG] СКИПНУТ (нет outcomePrices): '{title}'")
-                    continue
-            else:
-                if not m.get("clobTokenIds") or not m.get("outcomePrices"):
-                    continue
+            # Проверяем структуру
+            if not m.get("clobTokenIds") or not m.get("outcomePrices"):
+                continue
 
             game = _detect_game(title)
             
+            # Пишем в лог всё, что хоть как-то похоже на киберспорт или прилетело по тегу
+            is_esport_suspect = any(x in title_lower for x in ["vs", "map", "esl", "pgl", "iem", "dota", "cs2", "valorant", "major", "league"])
             if is_esport_suspect:
-                log.info(f"[MATCH-DEBUG] Прошёл валидацию структуры: '{title}' | Распознан как игра: {game}")
+                log.info(f"[MATCH-DEBUG] Рынок попал в анализ: '{title}' | Распознан как игра: {game}")
 
             if not game:
                 continue
