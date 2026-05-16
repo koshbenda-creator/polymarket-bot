@@ -1,15 +1,16 @@
 import os
 
-# Путь к базе данных
+# ── БАЗА ДАННЫХ ─────────────────────────────────────────────────────────────
 DB_PATH = os.getenv("DB_PATH", "/opt/polymarket-bot/bot.db")
 
-# Настройки планировщика (интервал сканирования в секундах)
+# ── ПЛАНИРОВЩИК (ТАЙМЕРЫ) ───────────────────────────────────────────────────
 SCANNER_INTERVAL_SECONDS = int(os.getenv("SCANNER_INTERVAL_SECONDS", 60))
+TRACKER_INTERVAL_SECONDS = int(os.getenv("TRACKER_INTERVAL_SECONDS", 60))
 
-# Основные настройки сети
+# ── СЕТЬ И API ──────────────────────────────────────────────────────────────
 POLYMARKET_HOST = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
 
-# ── Белый список: Регулярные выражения для детекции киберспортивных игр ───────
+# ── БЕЛЫЙ СПИСОК (КИБЕРСПОРТ) ───────────────────────────────────────────────
 CYBERSPORT_GAMES = {
     r"\bcs2\b": "CS2", r"\bcounter-strike\b": "CS2", r"\bcs:go\b": "CS2", r"\bcsgo\b": "CS2",
     r"\bblast\b": "CS2", r"\biem\b": "CS2", r"\bpgl\b": "CS2", r"\besl\b": "CS2",
@@ -30,7 +31,7 @@ CYBERSPORT_GAMES = {
     r"\bfortnite\b": "Fortnite",
 }
 
-# ── Чёрный список: Исключаем политику, экономику, шоубиз и традиционный спорт ──
+# ── ЧЁРНЫЙ СПИСОК (ФИЛЬТРАЦИЯ МУСОРА) ────────────────────────────────────────
 MARKET_BLACKLIST = [
     "election", "president", "biden", "trump", "democrat", "republican", 
     "house of", "senate", "crypto", "bitcoin", "ethereum", "fed ", "interest rate",
@@ -39,7 +40,7 @@ MARKET_BLACKLIST = [
     "la liga", "serie a", "champions league", "world cup", "football", "soccer", "liverpool", "epl"
 ]
 
-# ── Дефолтные настройки для Дашборда (Streamlit) ─────────────────────────────
+# ── ДЕФОЛТЫ ДЛЯ ДАШБОРДА (STREAMLIT) ────────────────────────────────────────
 DEFAULT_STRATEGY = {
     "entry_max_prob": 0.15,
     "entry_hours_before": 24,
