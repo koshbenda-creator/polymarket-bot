@@ -1,5 +1,8 @@
 import os
 
+# Путь к базе данных (вернули на место, чтобы db.py не ругался)
+DB_PATH = os.getenv("DB_PATH", "/opt/polymarket-bot/bot.db")
+
 # Основные настройки сети
 POLYMARKET_HOST = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
 
