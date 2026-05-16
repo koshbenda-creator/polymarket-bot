@@ -134,6 +134,21 @@ def update_strategy_params(strategy_id, params=None, filters=None):
     if params:
         conn.execute("UPDATE strategies SET params = ? WHERE id = ?",
                      (json.dumps(params), strategy_id))
+        # если изменился paper_deposit — обновляем deposit и balance
+        if "paper_deposit" in params:
+            new_deposit = float(params["paper_deposit"])
+            conn.execute(
+                "UPDATE strategies SET deposit = ?, balance = ? WHERE id = ?",
+                (new_deposit, new_deposit, strategy_id)
+            )
+            # сбрасываем историю баланса
+            conn.execute(
+                "DELETE FROM balance_history WHERE strategy_id = ?", (strategy_id,)
+            )
+            conn.execute(
+                "INSERT INTO balance_history (strategy_id, balance, recorded_at) VALUES (?, ?, ?)",
+                (strategy_id, new_deposit, datetime.utcnow().isoformat())
+            )
     if filters:
         conn.execute("UPDATE strategies SET filters = ? WHERE id = ?",
                      (json.dumps(filters), strategy_id))
