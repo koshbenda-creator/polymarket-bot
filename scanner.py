@@ -2,7 +2,7 @@
 #
 # Использует два API Polymarket:
 #   Gamma API  — метаданные рынков (название, теги, время)
-#   CLOB API   — точные live-цены (order book) чанками через GET
+#   CLOB API   — точные live-цены (order book) микро-пачками через GET
 
 import logging
 import json
@@ -10,7 +10,7 @@ import requests
 import re
 from datetime import datetime, timezone, timedelta
 
-from config import POLYMARKET_HOST
+from config import POLYMARKET_HOST, CYBERSPORT_GAMES, MARKET_BLACKLIST
 from db import (
     get_all_strategies,
     open_trade,
@@ -21,37 +21,10 @@ from db import (
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API  = POLYMARKET_HOST  # https://clob.polymarket.com
+CLOB_API  = POLYMARKET_HOST
 
-# ── Белый список: Точные ключевые слова с границами слов ────────────────────
-GAME_MAP = {
-    r"\bcs2\b": "CS2", r"\bcounter-strike\b": "CS2", r"\bcs:go\b": "CS2", r"\bcsgo\b": "CS2",
-    r"\bblast\b": "CS2", r"\biem\b": "CS2", r"\bpgl\b": "CS2", r"\besl\b": "CS2",
-    
-    r"\bdota\b": "Dota 2", r"\bti13\b": "Dota 2", r"\binternational\b": "Dota 2",
-    
-    r"\bvalorant\b": "Valorant", r"\bvct\b": "Valorant",
-    
-    r"\bleague of legends\b": "LoL", r"\blol\b": "LoL",
-    r"\blck\b": "LoL", r"\blpl\b": "LoL", r"\blec\b": "LoL", r"\blcs\b": "LoL", r"\bmsi\b": "LoL",
-    
-    r"\brainbow six\b": "Rainbow Six", r"\br6\b": "Rainbow Six",
-    r"\brocket league\b": "Rocket League", r"\brlcs\b": "Rocket League",
-    r"\boverwatch\b": "Overwatch", r"\bowl\b": "Overwatch",
-    r"\bcall of duty\b": "CoD", r"\bcod\b": "CoD",
-    r"\bstarcraft\b": "StarCraft", r"\bsc2\b": "StarCraft",
-    r"\bapex\b": "Apex Legends",
-    r"\bfortnite\b": "Fortnite",
-}
-
-# ── Чёрный список: Исключает политику, экономику и традиционный спорт ───────
-BLACKLIST = [
-    "election", "president", "biden", "trump", "democrat", "republican", 
-    "house of", "senate", "crypto", "bitcoin", "ethereum", "fed ", "interest rate",
-    "gdp", "inflation", "celeb", "oscar", "movie", "box office", "album", "unemployment",
-    "supreme court", "congress", "white house", "primaries", "premier league", "bundesliga",
-    "la liga", "serie a", "champions league", "world cup", "football", "soccer", "liverpool", "epl"
-]
+GAME_MAP = CYBERSPORT_GAMES
+BLACKLIST = MARKET_BLACKLIST
 
 
 def _detect_game(market_title: str) -> str | None:
@@ -81,7 +54,7 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает активные маркеты Polymarket."""
+    """Скачивает активные маркеты Polymarket с Gamma API."""
     try:
         all_markets = []
         
@@ -103,7 +76,7 @@ def fetch_gamma_markets() -> list[dict]:
                 break
             all_markets.extend(chunk)
         
-        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} active рынков для анализа.")
+        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} активных рынков для анализа.")
 
         valid_markets = []
         for m in all_markets:
@@ -146,12 +119,11 @@ def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
         return prices
         
     unique_tokens = list(set(token_ids))
-    chunk_size = 10  # Маленький размер пачки, чтобы URL не был слишком длинным
+    chunk_size = 10
     
     for i in range(0, len(unique_tokens), chunk_size):
         chunk = unique_tokens[i:i + chunk_size]
         try:
-            # Формируем правильный query string: ?token_ids=A&token_ids=B
             params = [("token_ids", t_id) for t_id in chunk]
             resp = requests.get(
                 f"{CLOB_API}/prices",
@@ -200,7 +172,7 @@ def find_underdog(market: dict, max_prob: float, prices_cache: dict) -> dict | N
 
 
 def scan_markets():
-    """Основной рабочий цикл сканера."""
+    """Основной рабочий цикл сканера киберспортивных рынков."""
     log.info("[Scanner] Запуск сканирования киберспортивных рынков...")
     
     strategies = get_all_strategies()
@@ -264,21 +236,22 @@ def scan_markets():
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
+            # Ищем любого аутсайдера до 100%, чтобы трекать движение цены
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
-                # Используем позиционные аргументы БЕЗ имен (ключей), чтобы избежать несовпадений с db.py
+                # ВАЖНО: Возвращены строгие именованные аргументы, согласованные с db.py
                 try:
                     upsert_monitored_market(
-                        market_id,
-                        market.get("question", ""),
-                        game,
-                        mtype,
-                        any_underdog["team"],
-                        any_underdog["price"],
-                        market["_start"].isoformat() if market["_start"] else None
+                        market_id       = market_id,
+                        event_name      = market.get("question", ""),
+                        game            = game,
+                        market_type     = mtype,
+                        underdog_team   = any_underdog["team"],
+                        underdog_price  = any_underdog["price"],
+                        match_starts_at = market["_start"].isoformat() if market["_start"] else None
                     )
                 except Exception as db_err:
-                    log.error(f"[Scanner] Ошибка записи в таблицу мониторинга: {db_err}")
+                    log.error(f"[Scanner] Ошибка записи upsert_monitored_market в БД: {db_err}")
 
             if market_id in open_market_ids:
                 continue
