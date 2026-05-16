@@ -5,6 +5,7 @@
 
 import logging
 import requests
+import json as _json
 from datetime import datetime, timezone, timedelta
 
 from db import (
@@ -54,10 +55,10 @@ MARKET_TYPE_MAP = {
 # Вспомогательные функции
 # ────────────────────────────────────────────────────────────────────────────
 
-def _detect_game(text):
-    t = text.lower()
+def _detect_game(search_text):
+    """Ищет игру в подготовленном расширенном текстовом блоке."""
     for kw, game in GAME_MAP.items():
-        if kw in t:
+        if kw in search_text:
             return game
     return None
 
@@ -68,12 +69,6 @@ def _detect_market_type(question):
         if kw in q:
             return mtype
     return "match_winner"
-
-
-def _is_esports(question):
-    """Определяем киберспорт только по тексту вопроса (tags = None в API)."""
-    q = question.lower()
-    return any(kw in q for kw in ESPORTS_KEYWORDS)
 
 
 def _parse_dt(dt_str):
@@ -99,7 +94,6 @@ def _now_utc():
 def fetch_active_markets(limit=100, max_markets=5000):
     """
     Получаем все активные рынки с пагинацией.
-    limit=100 — максимум который возвращает Gamma API за один запрос.
     """
     markets = []
     offset = 0
@@ -123,7 +117,7 @@ def fetch_active_markets(limit=100, max_markets=5000):
             log.error(f"[Scanner] Gamma API ошибка: {e}")
             break
 
-        if not batch:
+        if not batch or len(batch) == 0:
             break
 
         markets.extend(batch)
@@ -131,6 +125,7 @@ def fetch_active_markets(limit=100, max_markets=5000):
 
         if len(batch) < limit:
             break
+            
         offset += limit
         if len(markets) >= max_markets:
             log.info(f'[Scanner] Достигнут лимит {max_markets} рынков')
@@ -149,8 +144,6 @@ def _get_prices(market):
     Возвращает (p0, p1) для двух исходов рынка.
     Приоритет: outcomePrices → bestBid/bestAsk → None
     """
-    import json as _json
-
     # 1. outcomePrices — самый надёжный источник
     outcome_prices = market.get("outcomePrices")
     if outcome_prices:
@@ -208,31 +201,43 @@ def filter_markets_for_strategy(markets, strategy):
 
     result = []
     for m in markets:
-        question = m.get("question", "")
-
-        # киберспорт по тексту вопроса
-        if not _is_esports(question):
+        # Критически важно: пропускаем рынки без токена торговли CLOB
+        if not m.get("conditionId"):
             continue
 
-        # определяем игру
-        game = _detect_game(question)
+        question = m.get("question", "")
+        slug = m.get("slug", "")
+        
+        # Безопасно достаем название ивента/турнира, если оно есть
+        event_data = m.get("event")
+        event_title = event_data.get("title", "") if isinstance(event_data, dict) else ""
+
+        # Объединяем все метаданные для поиска ключевых слов киберспорта
+        search_text = f"{question} {slug} {event_title}".lower()
+
+        # 1. Проверяем, относится ли к киберспорту
+        if not any(kw in search_text for kw in ESPORTS_KEYWORDS):
+            continue
+
+        # 2. Определяем конкретную игру
+        game = _detect_game(search_text)
         if not game or game not in allowed_games:
             continue
 
-        # тип рынка
+        # 3. Проверяем тип рынка (матч или конкретная карта)
         mtype = _detect_market_type(question)
         if mtype not in allowed_types:
             continue
 
-        # время начала — используем startDateIso или startDate
+        # 4. Проверка по времени начала
         start_dt = _parse_dt(
             m.get("startDateIso") or m.get("startDate") or m.get("endDateIso")
         )
         if start_dt:
             if start_dt <= now:
-                continue  # уже началось
+                continue  # Матч уже идет или завершен
             if start_dt > deadline:
-                continue  # слишком далеко
+                continue  # Матч начнется еще не скоро
 
         m["_game"]  = game
         m["_mtype"] = mtype
@@ -251,8 +256,6 @@ def find_underdog(market, max_prob):
     Возвращает {"team": str, "price": float} или None.
     Ищет исход с ценой < max_prob.
     """
-    import json as _json
-
     p0, p1 = _get_prices(market)
     if p0 is None or p1 is None:
         return None
@@ -309,23 +312,24 @@ def scan_markets():
 
         entered = 0
         for market in candidates:
-            market_id = market.get("conditionId") or market.get("id", "")
+            # Используем строго conditionId для совместимости с CLOB
+            market_id = market.get("conditionId")
 
-            # обновляем монитор для дашборда — все кандидаты
+            # Обновляем монитор для дашборда
             p0, p1 = _get_prices(market)
             if p0 is not None:
-                import json as _json
                 outcomes = market.get("outcomes", ["Yes", "No"])
                 if isinstance(outcomes, str):
                     try:
                         outcomes = _json.loads(outcomes)
                     except Exception:
                         outcomes = ["Yes", "No"]
-                # в монитор пишем меньший из двух исходов
+                        
+                # Пишем в монитор меньший исход
                 if p0 <= p1:
-                    mon_price, mon_team = p0, outcomes[0] if outcomes else "Yes"
+                    mon_price, mon_team = p0, (outcomes[0] if outcomes else "Yes")
                 else:
-                    mon_price, mon_team = p1, outcomes[1] if len(outcomes) > 1 else "No"
+                    mon_price, mon_team = p1, (outcomes[1] if len(outcomes) > 1 else "No")
 
                 upsert_monitored_market(
                     market_id      = market_id,
@@ -339,11 +343,11 @@ def scan_markets():
                     ),
                 )
 
-            # не дублируем открытые сделки
+            # Не дублируем открытые сделки
             if market_id in open_market_ids:
                 continue
 
-            # ищем аутсайдера под порог стратегии
+            # Ищем аутсайдера под порог стратегии
             underdog = find_underdog(market, max_prob=max_prob)
             if not underdog:
                 continue
