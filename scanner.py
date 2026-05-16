@@ -103,7 +103,7 @@ def fetch_gamma_markets() -> list[dict]:
                 break
             all_markets.extend(chunk)
         
-        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} активных рынков для анализа.")
+        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} active рынков для анализа.")
 
         valid_markets = []
         for m in all_markets:
@@ -140,28 +140,30 @@ def fetch_gamma_markets() -> list[dict]:
 
 
 def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
-    """Получает точные цены из CLOB API через POST запрос (без ограничений длины URL)."""
+    """Получает точные цены из CLOB API через POST запрос, оборачивая в объект token_ids."""
     prices = {}
     if not token_ids:
         return prices
         
-    # Удаляем дубликаты токенов для оптимизации трафика
     unique_tokens = list(set(token_ids))
     
     try:
-        # Polymarket CLOB API принимает массив токенов в теле POST запроса на эндпоинт /prices
+        # Polymarket CLOB API ожидает структуру {"token_ids": [...]}
         resp = requests.post(
             f"{CLOB_API}/prices",
-            json=unique_tokens,
+            json={"token_ids": unique_tokens},
             timeout=12
         )
         resp.raise_for_status()
         data = resp.json()
-        for t_id, p_str in data.items():
-            try:
-                prices[t_id] = float(p_str)
-            except (ValueError, TypeError):
-                pass
+        
+        # Ответ приходит в виде {"0x...": "0.12", "0x...": "0.88"}
+        if isinstance(data, dict):
+            for t_id, p_str in data.items():
+                try:
+                    prices[t_id] = float(p_str)
+                except (ValueError, TypeError):
+                    pass
     except Exception as e:
         log.error(f"[Scanner] Ошибка отправки POST в CLOB API цен: {e}")
         
@@ -259,17 +261,18 @@ def scan_markets():
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
-            # Корректный вызов под сигнатуру вашей БД (аргументы team и price)
+            # Ищем любого аутсайдера (до 100%), чтобы закинуть в таблицу мониторинга
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
+                # ВАЖНО: строго под сигнатуру db.py (underdog_team, underdog_price)
                 upsert_monitored_market(
-                    market_id      = market_id,
-                    event_name     = market.get("question", ""),
-                    game           = game,
-                    market_type    = mtype,
-                    team           = any_underdog["team"],
-                    price          = any_underdog["price"],
-                    match_starts_at= market["_start"].isoformat() if market["_start"] else None,
+                    market_id       = market_id,
+                    event_name      = market.get("question", ""),
+                    game            = game,
+                    market_type     = mtype,
+                    underdog_team   = any_underdog["team"],
+                    underdog_price  = any_underdog["price"],
+                    match_starts_at = market["_start"].isoformat() if market["_start"] else None,
                 )
 
             if market_id in open_market_ids:
