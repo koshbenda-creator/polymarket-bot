@@ -5,6 +5,7 @@
 #   CLOB API   — текущие цены (order book)
 
 import logging
+import json
 import requests
 from datetime import datetime, timezone, timedelta
 
@@ -55,11 +56,9 @@ def _detect_game(market_title: str) -> str | None:
     """Определяет киберспортивную дисциплину по названию рынка с защитой от политики."""
     title_lower = market_title.lower()
     
-    # 1. Если есть хоть одно слово из черного списка — это НЕ киберспорт
     if any(bad_word in title_lower for bad_word in BLACKLIST):
         return None
         
-    # 2. Ищем совпадение по ключевым словам игр
     for keyword, game_name in GAME_MAP.items():
         if keyword in title_lower:
             return game_name
@@ -84,7 +83,6 @@ def fetch_gamma_markets() -> list[dict]:
     try:
         all_markets = []
         
-        # Сканируем первые 5 страниц (до 500 рынков)
         for offset in [0, 100, 200, 300, 400]:
             resp = requests.get(
                 f"{GAMMA_API}/markets",
@@ -113,7 +111,7 @@ def fetch_gamma_markets() -> list[dict]:
             title = m.get("question", "")
             game = _detect_game(title)
             if not game:
-                continue  # Фильтруем здесь
+                continue
 
             start_dt = None
             if m.get("gameStartTime"):
@@ -140,25 +138,32 @@ def fetch_gamma_markets() -> list[dict]:
 
 
 def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
-    """Получает точные live-цены (order book) из CLOB API для списка токенов."""
+    """Получает точные live-цены из CLOB API пачками по 20 штук во избежание ошибки 400."""
     prices = {}
     if not token_ids:
         return prices
-    try:
-        resp = requests.get(
-            f"{CLOB_API}/prices",
-            params={"token_ids": token_ids},
-            timeout=10
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        for t_id, p_str in data.items():
-            try:
-                prices[t_id] = float(p_str)
-            except (ValueError, TypeError):
-                pass
-    except Exception as e:
-        log.error(f"[Scanner] Ошибка CLOB API цен: {e}")
+        
+    # Разбиваем список токенов на чанки по 20 штук
+    chunk_size = 20
+    token_chunks = [token_ids[i:i + chunk_size] for i in range(0, len(token_ids), chunk_size)]
+    
+    for chunk in token_chunks:
+        try:
+            resp = requests.get(
+                f"{CLOB_API}/prices",
+                params={"token_ids": chunk},
+                timeout=10
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for t_id, p_str in data.items():
+                try:
+                    prices[t_id] = float(p_str)
+                except (ValueError, TypeError):
+                    pass
+        except Exception as e:
+            log.error(f"[Scanner] Ошибка пачки CLOB API цен: {e}")
+            
     return prices
 
 
@@ -214,9 +219,14 @@ def scan_markets():
     for strategy in active_strategies:
         strategy_id = strategy["id"]
         
-        import json
-        params = json.loads(strategy["params"])
-        filters = json.loads(strategy["filters"])
+        # Безопасный парсинг параметров из БД (строка или уже словарь)
+        params = strategy["params"]
+        if isinstance(params, str):
+            params = json.loads(params)
+            
+        filters = strategy["filters"]
+        if isinstance(filters, str):
+            filters = json.loads(filters)
 
         max_prob = params.get("entry_max_prob", 0.15)
         hours_before = params.get("entry_hours_before", 24)
@@ -235,6 +245,7 @@ def scan_markets():
             game = market["_game"]
             mtype = market["_mtype"]
 
+            # Выводим инфу о найденном матче
             log.info(f"[MATCH-DEBUG] Найден подходящий маркет: '{market['question']}' | Игра: {game} | Тип: {mtype}")
 
             if game.lower() not in allowed_games:
