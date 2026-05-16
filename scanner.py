@@ -1,14 +1,12 @@
 # scanner.py — поиск аутсайдеров на Polymarket
 #
-# Использует два API Polymarket:
-#   Gamma API  — метаданные рынков (название, теги, время)
-#   CLOB API   — текущие цены (order book)
+# Gamma API — метаданные + цены (bestBid/bestAsk прямо в ответе)
+# CLOB API  — не используется для цен, только как фоллбэк
 
 import logging
 import requests
 from datetime import datetime, timezone, timedelta
 
-from config import POLYMARKET_HOST
 from db import (
     get_all_strategies,
     open_trade,
@@ -19,7 +17,6 @@ from db import (
 log = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
-CLOB_API  = POLYMARKET_HOST  # https://clob.polymarket.com
 
 # ── Ключевые слова для определения киберспорта ──────────────────────────────
 ESPORTS_KEYWORDS = [
@@ -73,9 +70,10 @@ def _detect_market_type(question):
     return "match_winner"
 
 
-def _is_esports(tags, question):
-    combined = " ".join(tags).lower() + " " + question.lower()
-    return any(kw in combined for kw in ESPORTS_KEYWORDS)
+def _is_esports(question):
+    """Определяем киберспорт только по тексту вопроса (tags = None в API)."""
+    q = question.lower()
+    return any(kw in q for kw in ESPORTS_KEYWORDS)
 
 
 def _parse_dt(dt_str):
@@ -95,7 +93,11 @@ def _now_utc():
 # Gamma API — список активных рынков
 # ────────────────────────────────────────────────────────────────────────────
 
-def fetch_active_markets(limit=500):
+def fetch_active_markets(limit=100):
+    """
+    Получаем все активные рынки с пагинацией.
+    limit=100 — максимум который возвращает Gamma API за один запрос.
+    """
     markets = []
     offset = 0
     session = requests.Session()
@@ -122,60 +124,70 @@ def fetch_active_markets(limit=500):
             break
 
         markets.extend(batch)
+        log.debug(f"[Scanner] Загружено {len(markets)} рынков (offset={offset})")
 
         if len(batch) < limit:
             break
         offset += limit
 
-    log.info(f"[Scanner] Получено рынков: {len(markets)}")
+    log.info(f"[Scanner] Получено рынков всего: {len(markets)}")
     return markets
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# CLOB API — текущие цены
+# Определяем цену из ответа Gamma (без отдельных запросов к CLOB)
 # ────────────────────────────────────────────────────────────────────────────
 
-def fetch_prices_batch(token_ids):
-    """Батчевый запрос цен. Возвращает {token_id: float}."""
-    if not token_ids:
-        return {}
-    try:
-        resp = requests.get(
-            f"{CLOB_API}/prices",
-            params={"token_ids": ",".join(token_ids)},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return {k: float(v) for k, v in resp.json().items()}
-    except Exception as e:
-        log.debug(f"[Scanner] CLOB batch price error: {e}")
-        return {}
+def _get_prices(market):
+    """
+    Возвращает (p0, p1) для двух исходов рынка.
+    Приоритет: outcomePrices → bestBid/bestAsk → None
+    """
+    import json as _json
 
+    # 1. outcomePrices — самый надёжный источник
+    outcome_prices = market.get("outcomePrices")
+    if outcome_prices:
+        try:
+            if isinstance(outcome_prices, str):
+                outcome_prices = _json.loads(outcome_prices)
+            p0 = float(outcome_prices[0])
+            p1 = float(outcome_prices[1])
+            if 0 < p0 < 1 and 0 < p1 < 1:
+                return round(p0, 4), round(p1, 4)
+        except Exception:
+            pass
 
-def fetch_price_single(condition_id):
-    """Одиночный запрос цены через order book. Возвращает mid-price или None."""
-    try:
-        resp = requests.get(
-            f"{CLOB_API}/book",
-            params={"token_id": condition_id},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        asks = data.get("asks", [])
-        bids = data.get("bids", [])
-        if not asks:
-            return None
-        ask = float(asks[0]["price"])
-        bid = float(bids[0]["price"]) if bids else ask
-        return round((ask + bid) / 2, 4)
-    except Exception as e:
-        log.debug(f"[Scanner] CLOB single price error: {e}")
-        return None
+    # 2. bestBid / bestAsk — прямо в ответе Gamma
+    best_ask = market.get("bestAsk")
+    best_bid = market.get("bestBid")
+    if best_ask is not None:
+        try:
+            ask = float(best_ask)
+            bid = float(best_bid) if best_bid else ask
+            p0 = round((ask + bid) / 2, 4)
+            p1 = round(1 - p0, 4)
+            if 0 < p0 < 1:
+                return p0, p1
+        except Exception:
+            pass
+
+    # 3. lastTradePrice как последний фоллбэк
+    last = market.get("lastTradePrice")
+    if last is not None:
+        try:
+            p0 = round(float(last), 4)
+            p1 = round(1 - p0, 4)
+            if 0 < p0 < 1:
+                return p0, p1
+        except Exception:
+            pass
+
+    return None, None
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Фильтрация рынков
+# Фильтрация рынков под параметры стратегии
 # ────────────────────────────────────────────────────────────────────────────
 
 def filter_markets_for_strategy(markets, strategy):
@@ -191,29 +203,30 @@ def filter_markets_for_strategy(markets, strategy):
     result = []
     for m in markets:
         question = m.get("question", "")
-        raw_tags = m.get("tags", [])
-        if isinstance(raw_tags, list):
-            tags = [t.get("label", "") if isinstance(t, dict) else str(t) for t in raw_tags]
-        else:
-            tags = []
 
-        if not _is_esports(tags, question):
+        # киберспорт по тексту вопроса
+        if not _is_esports(question):
             continue
 
-        game = _detect_game(" ".join(tags) + " " + question)
+        # определяем игру
+        game = _detect_game(question)
         if not game or game not in allowed_games:
             continue
 
+        # тип рынка
         mtype = _detect_market_type(question)
         if mtype not in allowed_types:
             continue
 
-        start_dt = _parse_dt(m.get("startDate") or m.get("gameStartTime"))
+        # время начала — используем startDateIso или startDate
+        start_dt = _parse_dt(
+            m.get("startDateIso") or m.get("startDate") or m.get("endDateIso")
+        )
         if start_dt:
             if start_dt <= now:
-                continue
+                continue  # уже началось
             if start_dt > deadline:
-                continue
+                continue  # слишком далеко
 
         m["_game"]  = game
         m["_mtype"] = mtype
@@ -227,57 +240,27 @@ def filter_markets_for_strategy(markets, strategy):
 # Определяем аутсайдера
 # ────────────────────────────────────────────────────────────────────────────
 
-def find_underdog(market, max_prob, prices_cache=None):
+def find_underdog(market, max_prob):
     """
     Возвращает {"team": str, "price": float} или None.
-    Сначала пробуем цены из Gamma (outcomePrices),
-    потом из батч-кэша CLOB, потом одиночный запрос.
+    Ищет исход с ценой < max_prob.
     """
     import json as _json
 
-    # --- цены ---
-    outcome_prices = market.get("outcomePrices")
-    p0, p1 = None, None
-
-    if outcome_prices:
-        try:
-            if isinstance(outcome_prices, str):
-                outcome_prices = _json.loads(outcome_prices)
-            p0 = float(outcome_prices[0])
-            p1 = float(outcome_prices[1])
-        except Exception:
-            pass
-
-    if p0 is None:
-        tokens = market.get("clobTokenIds", [])
-        if isinstance(tokens, str):
-            try:
-                tokens = _json.loads(tokens)
-            except Exception:
-                tokens = []
-
-        if tokens and len(tokens) >= 2:
-            if prices_cache:
-                p0 = prices_cache.get(tokens[0])
-                p1 = prices_cache.get(tokens[1])
-            if p0 is None:
-                p0 = fetch_price_single(tokens[0])
-            if p1 is None and len(tokens) > 1:
-                p1 = 1 - p0 if p0 is not None else None
-
+    p0, p1 = _get_prices(market)
     if p0 is None or p1 is None:
         return None
 
-    # --- названия исходов ---
-    outcomes = market.get("outcomes", ["Team A", "Team B"])
+    # названия исходов
+    outcomes = market.get("outcomes", ["Yes", "No"])
     if isinstance(outcomes, str):
         try:
             outcomes = _json.loads(outcomes)
         except Exception:
-            outcomes = ["Team A", "Team B"]
+            outcomes = ["Yes", "No"]
 
-    label0 = outcomes[0] if len(outcomes) > 0 else "Team A"
-    label1 = outcomes[1] if len(outcomes) > 1 else "Team B"
+    label0 = outcomes[0] if len(outcomes) > 0 else "Yes"
+    label1 = outcomes[1] if len(outcomes) > 1 else "No"
 
     for price, label in [(p0, label0), (p1, label1)]:
         if 0 < price < max_prob:
@@ -287,7 +270,7 @@ def find_underdog(market, max_prob, prices_cache=None):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Публичная функция — вызывается из main.py
+# Публичная функция — вызывается из main.py каждые 60 секунд
 # ────────────────────────────────────────────────────────────────────────────
 
 def scan_markets():
@@ -303,21 +286,6 @@ def scan_markets():
         log.warning("[Scanner] Рынков не получено.")
         return
 
-    # Батчевый запрос цен для всех token_id сразу (экономим запросы)
-    import json as _json
-    all_token_ids = []
-    for m in all_markets:
-        tokens = m.get("clobTokenIds", [])
-        if isinstance(tokens, str):
-            try:
-                tokens = _json.loads(tokens)
-            except Exception:
-                tokens = []
-        all_token_ids.extend(tokens[:2])
-
-    prices_cache = fetch_prices_batch(all_token_ids) if all_token_ids else {}
-    log.info(f"[Scanner] Получено цен из CLOB: {len(prices_cache)}")
-
     for strategy in strategies:
         strategy_id = strategy["id"]
         params      = strategy["params"]
@@ -329,23 +297,37 @@ def scan_markets():
 
         log.info(
             f"[Scanner] '{strategy['name']}': "
-            f"{len(candidates)} кандидатов (порог <{max_prob*100:.0f}%)"
+            f"{len(candidates)} кандидатов из {len(all_markets)} "
+            f"(порог <{max_prob*100:.0f}%)"
         )
 
         entered = 0
         for market in candidates:
             market_id = market.get("conditionId") or market.get("id", "")
 
-            # обновляем монитор для дашборда (все рынки, не только под порог)
-            any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
-            if any_underdog:
+            # обновляем монитор для дашборда — все кандидаты
+            p0, p1 = _get_prices(market)
+            if p0 is not None:
+                import json as _json
+                outcomes = market.get("outcomes", ["Yes", "No"])
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = _json.loads(outcomes)
+                    except Exception:
+                        outcomes = ["Yes", "No"]
+                # в монитор пишем меньший из двух исходов
+                if p0 <= p1:
+                    mon_price, mon_team = p0, outcomes[0] if outcomes else "Yes"
+                else:
+                    mon_price, mon_team = p1, outcomes[1] if len(outcomes) > 1 else "No"
+
                 upsert_monitored_market(
                     market_id      = market_id,
                     event_name     = market.get("question", ""),
                     game           = market["_game"],
                     market_type    = market["_mtype"],
-                    team           = any_underdog["team"],
-                    current_price  = any_underdog["price"],
+                    team           = mon_team,
+                    current_price  = mon_price,
                     match_starts_at= (
                         market["_start"].isoformat() if market["_start"] else None
                     ),
@@ -356,7 +338,7 @@ def scan_markets():
                 continue
 
             # ищем аутсайдера под порог стратегии
-            underdog = find_underdog(market, max_prob=max_prob, prices_cache=prices_cache)
+            underdog = find_underdog(market, max_prob=max_prob)
             if not underdog:
                 continue
 
