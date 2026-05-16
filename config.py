@@ -1,6 +1,6 @@
 import os
 
-# Путь к базе данных (вернули на место, чтобы db.py не ругался)
+# Путь к базе данных
 DB_PATH = os.getenv("DB_PATH", "/opt/polymarket-bot/bot.db")
 
 # Основные настройки сети
@@ -35,3 +35,15 @@ MARKET_BLACKLIST = [
     "supreme court", "congress", "white house", "primaries", "premier league", "bundesliga",
     "la liga", "serie a", "champions league", "world cup", "football", "soccer", "liverpool", "epl"
 ]
+
+# ── Дефолтные настройки для Дашборда (Streamlit) ─────────────────────────────
+DEFAULT_STRATEGY = {
+    "entry_max_prob": 0.15,
+    "entry_hours_before": 24,
+    "bet_size": 50.0
+}
+
+DEFAULT_MARKET_FILTERS = {
+    "games": ["CS2", "Dota 2", "Valorant", "LoL"],
+    "market_types": ["match_winner", "map1", "map2"]
+}
