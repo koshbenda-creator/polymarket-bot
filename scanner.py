@@ -246,4 +246,48 @@ def scan_markets():
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
-            # Ищем любого аутсай
+            # Ищем любого аутсайдера до 100%, чтобы трекать движение цены
+            any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
+            if any_underdog:
+                try:
+                    upsert_monitored_market(
+                        market_id       = market_id,
+                        event_name      = market.get("question", ""),
+                        game            = game,
+                        market_type     = mtype,
+                        underdog_team   = any_underdog["team"],
+                        underdog_price  = any_underdog["price"],
+                        match_starts_at = market["_start"].isoformat() if market["_start"] else None
+                    )
+                except Exception as db_err:
+                    log.error(f"[Scanner] Ошибка записи upsert_monitored_market в БД: {db_err}")
+
+            if market_id in open_market_ids:
+                continue
+
+            underdog = find_underdog(market, max_prob=max_prob, prices_cache=prices_cache)
+            if not underdog:
+                continue
+
+            trade_id = open_trade(
+                strategy_id    = strategy_id,
+                market_id      = market_id,
+                event_name     = market.get("question", ""),
+                game           = game,
+                market_type    = mtype,
+                team           = underdog["team"],
+                entry_price    = underdog["price"],
+                bet_size       = bet_size,
+                match_starts_at= market["_start"].isoformat() if market["_start"] else None,
+            )
+            open_market_ids.add(market_id)
+            entered += 1
+            log.info(
+                f"[Scanner] ✅ Открыта сделка: {market.get('question', '')} | "
+                f"{underdog['team']} @ {underdog['price']*100:.1f}% | trade #{trade_id}"
+            )
+
+        if entered > 0:
+            log.info(f"[Scanner] '{strategy['name']}': открыто {entered} новых сделок.")
+
+    log.info("[Scanner] Сканирование успешно завершено.")
