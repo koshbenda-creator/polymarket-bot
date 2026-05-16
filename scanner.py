@@ -56,7 +56,6 @@ MARKET_TYPE_MAP = {
 # ────────────────────────────────────────────────────────────────────────────
 
 def _detect_game(search_text):
-    """Ищет игру в подготовленном расширенном текстовом блоке."""
     for kw, game in GAME_MAP.items():
         if kw in search_text:
             return game
@@ -75,10 +74,12 @@ def _parse_dt(dt_str):
     if not dt_str:
         return None
     try:
-        dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        if isinstance(dt_str, str) and dt_str.endswith("Z"):
+            dt_str = dt_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(dt_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
@@ -92,9 +93,6 @@ def _now_utc():
 # ────────────────────────────────────────────────────────────────────────────
 
 def fetch_active_markets(limit=100, max_markets=5000):
-    """
-    Получаем все активные рынки с пагинацией.
-    """
     markets = []
     offset = 0
     session = requests.Session()
@@ -121,11 +119,9 @@ def fetch_active_markets(limit=100, max_markets=5000):
             break
 
         markets.extend(batch)
-        log.debug(f"[Scanner] Загружено {len(markets)} рынков (offset={offset})")
-
+        
         if len(batch) < limit:
             break
-            
         offset += limit
         if len(markets) >= max_markets:
             log.info(f'[Scanner] Достигнут лимит {max_markets} рынков')
@@ -136,15 +132,10 @@ def fetch_active_markets(limit=100, max_markets=5000):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Определяем цену из ответа Gamma (без отдельных запросов к CLOB)
+# Определяем цену из ответа Gamma
 # ────────────────────────────────────────────────────────────────────────────
 
 def _get_prices(market):
-    """
-    Возвращает (p0, p1) для двух исходов рынка.
-    Приоритет: outcomePrices → bestBid/bestAsk → None
-    """
-    # 1. outcomePrices — самый надёжный источник
     outcome_prices = market.get("outcomePrices")
     if outcome_prices:
         try:
@@ -157,7 +148,6 @@ def _get_prices(market):
         except Exception:
             pass
 
-    # 2. bestBid / bestAsk — прямо в ответе Gamma
     best_ask = market.get("bestAsk")
     best_bid = market.get("bestBid")
     if best_ask is not None:
@@ -171,7 +161,6 @@ def _get_prices(market):
         except Exception:
             pass
 
-    # 3. lastTradePrice как последний фоллбэк
     last = market.get("lastTradePrice")
     if last is not None:
         try:
@@ -193,57 +182,60 @@ def filter_markets_for_strategy(markets, strategy):
     params  = strategy["params"]
     filters = strategy["filters"]
 
-    allowed_games  = set(filters.get("games", []))
-    allowed_types  = set(filters.get("market_types", ["match_winner"]))
+    # Приводим к нижнему регистру для исключения ошибок сравнения строк
+    allowed_games  = {g.lower() for g in filters.get("games", [])}
+    allowed_types  = {t.lower() for t in filters.get("market_types", ["match_winner"])}
+    
     hours_before   = params.get("entry_hours_before", 24)
     now            = _now_utc()
     deadline       = now + timedelta(hours=hours_before)
 
     result = []
+    esports_count = 0
+    
     for m in markets:
-        # Критически важно: пропускаем рынки без токена торговли CLOB
         if not m.get("conditionId"):
             continue
 
         question = m.get("question", "")
         slug = m.get("slug", "")
-        
-        # Безопасно достаем название ивента/турнира, если оно есть
         event_data = m.get("event")
         event_title = event_data.get("title", "") if isinstance(event_data, dict) else ""
 
-        # Объединяем все метаданные для поиска ключевых слов киберспорта
         search_text = f"{question} {slug} {event_title}".lower()
 
-        # 1. Проверяем, относится ли к киберспорту
+        # 1. Киберспорт?
         if not any(kw in search_text for kw in ESPORTS_KEYWORDS):
             continue
+            
+        esports_count += 1
 
-        # 2. Определяем конкретную игру
+        # 2. Какая игра?
         game = _detect_game(search_text)
-        if not game or game not in allowed_games:
+        if not game or game.lower() not in allowed_games:
             continue
 
-        # 3. Проверяем тип рынка (матч или конкретная карта)
+        # 3. Какой тип рынка?
         mtype = _detect_market_type(question)
-        if mtype not in allowed_types:
+        if mtype.lower() not in allowed_types:
             continue
 
-        # 4. Проверка по времени начала
+        # 4. Проверка времени начала матча
         start_dt = _parse_dt(
             m.get("startDateIso") or m.get("startDate") or m.get("endDateIso")
         )
         if start_dt:
             if start_dt <= now:
-                continue  # Матч уже идет или завершен
+                continue
             if start_dt > deadline:
-                continue  # Матч начнется еще не скоро
+                continue
 
         m["_game"]  = game
         m["_mtype"] = mtype
         m["_start"] = start_dt
         result.append(m)
 
+    log.info(f"[Scanner-DEBUG] Из 5000 рынков распознано как Киберспорт: {esports_count}. Прошло все фильтры даты/игр: {len(result)}")
     return result
 
 
@@ -252,15 +244,10 @@ def filter_markets_for_strategy(markets, strategy):
 # ────────────────────────────────────────────────────────────────────────────
 
 def find_underdog(market, max_prob):
-    """
-    Возвращает {"team": str, "price": float} или None.
-    Ищет исход с ценой < max_prob.
-    """
     p0, p1 = _get_prices(market)
     if p0 is None or p1 is None:
         return None
 
-    # названия исходов
     outcomes = market.get("outcomes", ["Yes", "No"])
     if isinstance(outcomes, str):
         try:
@@ -279,7 +266,7 @@ def find_underdog(market, max_prob):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Публичная функция — вызывается из main.py каждые 60 секунд
+# Публичная функция
 # ────────────────────────────────────────────────────────────────────────────
 
 def scan_markets():
@@ -312,10 +299,8 @@ def scan_markets():
 
         entered = 0
         for market in candidates:
-            # Используем строго conditionId для совместимости с CLOB
             market_id = market.get("conditionId")
 
-            # Обновляем монитор для дашборда
             p0, p1 = _get_prices(market)
             if p0 is not None:
                 outcomes = market.get("outcomes", ["Yes", "No"])
@@ -325,7 +310,6 @@ def scan_markets():
                     except Exception:
                         outcomes = ["Yes", "No"]
                         
-                # Пишем в монитор меньший исход
                 if p0 <= p1:
                     mon_price, mon_team = p0, (outcomes[0] if outcomes else "Yes")
                 else:
@@ -343,11 +327,9 @@ def scan_markets():
                     ),
                 )
 
-            # Не дублируем открытые сделки
             if market_id in open_market_ids:
                 continue
 
-            # Ищем аутсайдера под порог стратегии
             underdog = find_underdog(market, max_prob=max_prob)
             if not underdog:
                 continue
