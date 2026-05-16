@@ -33,7 +33,7 @@ def get_strategy(strategy_id: int):
 
 
 def update_strategy(strategy_id: int, name: str, is_active: bool, params: dict, filters: dict):
-    """Обновляет настройки стратегии в БД."""
+    """Обновляет настройки стратегии в БД целиком."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -41,6 +41,30 @@ def update_strategy(strategy_id: int, name: str, is_active: bool, params: dict, 
             SET name = ?, is_active = ?, params = ?, filters = ?
             WHERE id = ?
         ''', (name, int(is_active), json.dumps(params), json.dumps(filters), strategy_id))
+        conn.commit()
+
+
+def update_strategy_params(strategy_id: int, params: dict):
+    """Специфическая функция для дашборда: обновление только параметров (json)."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE strategies
+            SET params = ?
+            WHERE id = ?
+        ''', (json.dumps(params), strategy_id))
+        conn.commit()
+
+
+def update_strategy_status(strategy_id: int, is_active: bool):
+    """Специфическая функция для дашборда: включение/выключение стратегии."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE strategies
+            SET is_active = ?
+            WHERE id = ?
+        ''', (int(is_active), strategy_id))
         conn.commit()
 
 
