@@ -1,4 +1,4 @@
-# scanner.py — глубокое сканирование пагинации Polymarket
+# scanner.py
 import logging
 import json
 import requests
@@ -26,6 +26,10 @@ def _detect_game(market_title: str) -> str | None:
     """Определяет киберспортивную дисциплину по названию рынка (защита регулярками)."""
     title_lower = market_title.lower()
     
+    # Жесткий фикс, чтобы Международный суд и Нобелевка не детектились как Дота
+    if "nobel" in title_lower or "court of justice" in title_lower:
+        return None
+        
     if any(bad_word in title_lower for bad_word in BLACKLIST):
         return None
         
@@ -53,7 +57,6 @@ def fetch_gamma_markets() -> list[dict]:
     try:
         all_markets = []
         
-        # Листаем глубоко (10 страниц по 100 рынков), чтобы выудить нишевый киберспорт
         for offset in [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]:
             try:
                 resp = requests.get(
@@ -89,7 +92,6 @@ def fetch_gamma_markets() -> list[dict]:
             if not game:
                 continue
 
-            # Если игра определилась — выведем лог, подсветим находку
             log.info(f"[MATCH-DEBUG] Найдено киберспортивное событие: '{title}' -> {game}")
 
             start_dt = None
@@ -117,21 +119,21 @@ def fetch_gamma_markets() -> list[dict]:
 
 
 def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
-    """Получает точные цены из CLOB API через GET микро-пачками по 10 штук."""
+    """Получает точные цены из CLOB API через передачу JSON-массива в параметрах."""
     prices = {}
     if not token_ids:
         return prices
         
     unique_tokens = list(set(token_ids))
-    chunk_size = 10
+    chunk_size = 20
     
     for i in range(0, len(unique_tokens), chunk_size):
         chunk = unique_tokens[i:i + chunk_size]
         try:
-            params = [("token_ids", t_id) for t_id in chunk]
+            # Правильный формат запроса цен для CLOB API Polymarket
             resp = requests.get(
                 f"{CLOB_API}/prices",
-                params=params,
+                params={"token_ids": json.dumps(chunk)},
                 timeout=12
             )
             resp.raise_for_status()
@@ -238,7 +240,6 @@ def scan_markets():
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
-            # Ищем любого аутсайдера до 100%, чтобы трекать движение цены
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
                 try:
