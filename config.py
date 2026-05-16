@@ -3,6 +3,9 @@ import os
 # Путь к базе данных
 DB_PATH = os.getenv("DB_PATH", "/opt/polymarket-bot/bot.db")
 
+# Настройки планировщика (интервал сканирования в секундах)
+SCANNER_INTERVAL_SECONDS = int(os.getenv("SCANNER_INTERVAL_SECONDS", 60))
+
 # Основные настройки сети
 POLYMARKET_HOST = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
 
