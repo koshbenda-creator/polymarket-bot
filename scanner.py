@@ -209,26 +209,33 @@ def filter_markets_for_strategy(markets, strategy):
             continue
             
         esports_count += 1
-
-        # 2. Какая игра?
         game = _detect_game(search_text)
+        
+        # Подробный трекинг статуса для логирования
+        status_msg = "OK"
         if not game or game.lower() not in allowed_games:
-            continue
+            status_msg = f"ИГРА МИМО (Определено: '{game}', разрешено в БД: {list(allowed_games)})"
+        else:
+            # 3. Какой тип рынка?
+            mtype = _detect_market_type(question)
+            if mtype.lower() not in allowed_types:
+                status_msg = f"ТИП МИМО (Определено: '{mtype}', разрешено в БД: {list(allowed_types)})"
+            else:
+                # 4. Проверка времени начала матча
+                start_dt = _parse_dt(
+                    m.get("startDateIso") or m.get("startDate") or m.get("endDateIso")
+                )
+                if start_dt:
+                    if start_dt <= now:
+                        status_msg = f"УЖЕ ИДЕТ/ПРОШЕЛ (Матч: {start_dt.isoformat()}, Сейчас UTC: {now.isoformat()})"
+                    elif start_dt > deadline:
+                        status_msg = f"СЛИШКОМ ПОЗДНО (Матч: {start_dt.isoformat()}, Лимит до: {deadline.isoformat()})"
 
-        # 3. Какой тип рынка?
-        mtype = _detect_market_type(question)
-        if mtype.lower() not in allowed_types:
-            continue
+        # Логируем каждый найденный киберспортивный матч прямо в bot.log для диагностики
+        log.info(f"[MATCH-DEBUG] Матч: '{question}' | Игра: {game} | Статус: {status_msg}")
 
-        # 4. Проверка времени начала матча
-        start_dt = _parse_dt(
-            m.get("startDateIso") or m.get("startDate") or m.get("endDateIso")
-        )
-        if start_dt:
-            if start_dt <= now:
-                continue
-            if start_dt > deadline:
-                continue
+        if status_msg != "OK":
+            continue
 
         m["_game"]  = game
         m["_mtype"] = mtype
