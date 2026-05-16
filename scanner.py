@@ -2,11 +2,12 @@
 #
 # Использует два API Polymarket:
 #   Gamma API  — метаданные рынков (название, теги, время)
-#   CLOB API   — текущие цены (order book)
+#   CLOB API   — точные live-цены (order book) через POST-запросы
 
 import logging
 import json
 import requests
+import re
 from datetime import datetime, timezone, timedelta
 
 from config import POLYMARKET_HOST
@@ -22,45 +23,46 @@ log = logging.getLogger(__name__)
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_API  = POLYMARKET_HOST  # https://clob.polymarket.com
 
-# ── Белый список: Ключевые слова для определения игры ───────────────────────
+# ── Белый список: Точные ключевые слова с границами слов ────────────────────
 GAME_MAP = {
-    "cs2": "CS2", "counter-strike": "CS2", "cs:go": "CS2", "csgo": "CS2",
-    "blast": "CS2", "iem": "CS2", "pgl": "CS2", "esl": "CS2", "epl": "CS2",
+    r"\bcs2\b": "CS2", r"\bcounter-strike\b": "CS2", r"\bcs:go\b": "CS2", r"\bcsgo\b": "CS2",
+    r"\bblast\b": "CS2", r"\biem\b": "CS2", r"\bpgl\b": "CS2", r"\besl\b": "CS2", r"\bepl\b": "CS2",
     
-    "dota": "Dota 2", "ti13": "Dota 2", "international": "Dota 2",
+    r"\bdota\b": "Dota 2", r"\bti13\b": "Dota 2", r"\binternational\b": "Dota 2",
     
-    "valorant": "Valorant", "vct": "Valorant", "champions tour": "Valorant",
+    r"\bvalorant\b": "Valorant", r"\bvct\b": "Valorant",
     
-    "league of legends": "LoL", "lol": "LoL",
-    "lck": "LoL", "lpl": "LoL", "lec": "LoL", "lcs": "LoL", "cblol": "LoL", "msi": "LoL",
+    r"\bleague of legends\b": "LoL", r"\blol\b": "LoL",
+    r"\blck\b": "LoL", r"\blpl\b": "LoL", r"\blec\b": "LoL", r"\blcs\b": "LoL", r"\bmsi\b": "LoL",
     
-    "rainbow six": "Rainbow Six", "r6": "Rainbow Six", "invitational": "Rainbow Six",
-    "rocket league": "Rocket League", "rlcs": "Rocket League",
-    "overwatch": "Overwatch", "owl": "Overwatch",
-    "call of duty": "CoD", "cod": "CoD", "cdo": "CoD",
-    "starcraft": "StarCraft", "sc2": "StarCraft",
-    "apex": "Apex Legends",
-    "fortnite": "Fortnite",
+    r"\brainbow six\b": "Rainbow Six", r"\br6\b": "Rainbow Six",
+    r"\brocket league\b": "Rocket League", r"\brlcs\b": "Rocket League",
+    r"\boverwatch\b": "Overwatch", r"\bowl\b": "Overwatch",
+    r"\bcall of duty\b": "CoD", r"\bcod\b": "CoD",
+    r"\bstarcraft\b": "StarCraft", r"\bsc2\b": "StarCraft",
+    r"\bapex\b": "Apex Legends",
+    r"\bfortnite\b": "Fortnite",
 }
 
-# ── Чёрный список: Исключает политику, экономику и поп-культуру ─────────────
+# ── Чёрный список: Исключает политику, экономику и традиционный спорт ───────
 BLACKLIST = [
     "election", "president", "biden", "trump", "democrat", "republican", 
     "house of", "senate", "crypto", "bitcoin", "ethereum", "fed ", "interest rate",
     "gdp", "inflation", "celeb", "oscar", "movie", "box office", "album", "unemployment",
-    "supreme court", "congress", "white house", "primaries"
+    "supreme court", "congress", "white house", "primaries", "premier league", "bundesliga",
+    "la liga", "serie a", "champions league", "world cup", "football", "soccer"
 ]
 
 
 def _detect_game(market_title: str) -> str | None:
-    """Определяет киберспортивную дисциплину по названию рынка с защитой от политики."""
+    """Определяет киберспортивную дисциплину по названию рынка (защита регулярками)."""
     title_lower = market_title.lower()
     
     if any(bad_word in title_lower for bad_word in BLACKLIST):
         return None
         
-    for keyword, game_name in GAME_MAP.items():
-        if keyword in title_lower:
+    for pattern, game_name in GAME_MAP.items():
+        if re.search(pattern, title_lower):
             return game_name
                 
     return None
@@ -79,7 +81,7 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает активные маркеты Polymarket, пробивая пагинацию."""
+    """Скачивает активные маркеты Polymarket."""
     try:
         all_markets = []
         
@@ -138,32 +140,31 @@ def fetch_gamma_markets() -> list[dict]:
 
 
 def fetch_clob_prices(token_ids: list[str]) -> dict[str, float]:
-    """Получает точные live-цены из CLOB API пачками по 20 штук во избежание ошибки 400."""
+    """Получает точные цены из CLOB API через POST запрос (без ограничений длины URL)."""
     prices = {}
     if not token_ids:
         return prices
         
-    # Разбиваем список токенов на чанки по 20 штук
-    chunk_size = 20
-    token_chunks = [token_ids[i:i + chunk_size] for i in range(0, len(token_ids), chunk_size)]
+    # Удаляем дубликаты токенов для оптимизации трафика
+    unique_tokens = list(set(token_ids))
     
-    for chunk in token_chunks:
-        try:
-            resp = requests.get(
-                f"{CLOB_API}/prices",
-                params={"token_ids": chunk},
-                timeout=10
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            for t_id, p_str in data.items():
-                try:
-                    prices[t_id] = float(p_str)
-                except (ValueError, TypeError):
-                    pass
-        except Exception as e:
-            log.error(f"[Scanner] Ошибка пачки CLOB API цен: {e}")
-            
+    try:
+        # Polymarket CLOB API принимает массив токенов в теле POST запроса на эндпоинт /prices
+        resp = requests.post(
+            f"{CLOB_API}/prices",
+            json=unique_tokens,
+            timeout=12
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for t_id, p_str in data.items():
+            try:
+                prices[t_id] = float(p_str)
+            except (ValueError, TypeError):
+                pass
+    except Exception as e:
+        log.error(f"[Scanner] Ошибка отправки POST в CLOB API цен: {e}")
+        
     return prices
 
 
@@ -219,7 +220,6 @@ def scan_markets():
     for strategy in active_strategies:
         strategy_id = strategy["id"]
         
-        # Безопасный парсинг параметров из БД (строка или уже словарь)
         params = strategy["params"]
         if isinstance(params, str):
             params = json.loads(params)
@@ -245,7 +245,6 @@ def scan_markets():
             game = market["_game"]
             mtype = market["_mtype"]
 
-            # Выводим инфу о найденном матче
             log.info(f"[MATCH-DEBUG] Найден подходящий маркет: '{market['question']}' | Игра: {game} | Тип: {mtype}")
 
             if game.lower() not in allowed_games:
@@ -260,7 +259,7 @@ def scan_markets():
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
-            # Обновляем таблицу мониторинга в БД для дашборда
+            # Корректный вызов под сигнатуру вашей БД (аргументы team и price)
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
                 upsert_monitored_market(
@@ -268,8 +267,8 @@ def scan_markets():
                     event_name     = market.get("question", ""),
                     game           = game,
                     market_type    = mtype,
-                    underdog_team  = any_underdog["team"],
-                    underdog_price = any_underdog["price"],
+                    team           = any_underdog["team"],
+                    price          = any_underdog["price"],
                     match_starts_at= market["_start"].isoformat() if market["_start"] else None,
                 )
 
