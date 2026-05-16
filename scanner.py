@@ -1,4 +1,4 @@
-# scanner.py — поиск аутсайдеров на Polymarket (До и во время матча)
+# scanner.py — поиск аутсайдеров на Polymarket (С глубоким сканированием)
 #
 # Использует два API Polymarket:
 #   Gamma API  — метаданные рынков (название, теги, время)
@@ -24,11 +24,11 @@ CLOB_API  = POLYMARKET_HOST  # https://clob.polymarket.com
 
 # ── Ключевые слова для точного определения игры ─────────────────────────────
 GAME_MAP = {
-    "cs2": "CS2", "counter-strike": "CS2",
-    "blast premier": "CS2", "iem ": "CS2", "pgl ": "CS2",
+    "cs2": "CS2", "counter-strike": "CS2", "cs:go": "CS2", "csgo": "CS2",
+    "blast premier": "CS2", "iem ": "CS2", "pgl ": "CS2", "esl": "CS2",
     
     "dota": "Dota 2",
-    "valorant": "Valorant", "champions tour": "Valorant",
+    "valorant": "Valorant", "champions tour": "Valorant", "vct": "Valorant",
     
     "league of legends": "LoL", "lol": "LoL",
     "lck": "LoL", "lpl": "LoL", "lec": "LoL", "lcs": "LoL", "cblol": "LoL",
@@ -36,7 +36,7 @@ GAME_MAP = {
     "rainbow six": "Rainbow Six", "r6": "Rainbow Six",
     "rocket league": "Rocket League",
     "overwatch": "Overwatch",
-    "call of duty": "CoD",
+    "call of duty": "CoD", "cod": "CoD",
     "starcraft": "StarCraft",
     "apex": "Apex Legends",
     "fortnite": "Fortnite",
@@ -52,7 +52,7 @@ def _detect_game(market_title: str) -> str | None:
             if keyword in title_lower:
                 return game_name
         else:
-            # Короткие теги (lol, cs2, r6) ищем строго как отдельные слова
+            # Короткие теги ищем строго как отдельные слова
             if re.search(r'\b' + re.escape(keyword) + r'\b', title_lower):
                 return game_name
                 
@@ -72,34 +72,48 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает активные маркеты Polymarket без жестких тегов, чтобы не пропускать матчи."""
+    """Скачивает абсолютно все активные маркеты Polymarket, пробивая лимиты."""
     try:
-        # Запрашиваем широкую выборку (500 рынков), чтобы туда точно попал весь киберспорт
-        resp = requests.get(
-            f"{GAMMA_API}/markets",
-            params={
-                "closed": "false",
-                "resolved": "false",
-                "limit": 500,
-            },
-            timeout=15
-        )
-        resp.raise_for_status()
-        markets = resp.json()
+        all_markets = []
         
-        log.info(f"[Scanner] Gamma API вернул {len(markets)} активных рынков для анализа.")
+        # Делаем запросы по страницам, чтобы вытащить до 1000 рынков и найти киберспорт
+        for offset in [0, 100, 200, 300, 400]:
+            resp = requests.get(
+                f"{GAMMA_API}/markets",
+                params={
+                    "closed": "false",
+                    "resolved": "false",
+                    "active": "true",  # Только живые рынки, где идут торги
+                    "limit": 100,
+                    "offset": offset,
+                },
+                timeout=15
+            )
+            resp.raise_for_status()
+            chunk = resp.json()
+            if not chunk:
+                break
+            all_markets.extend(chunk)
+        
+        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} активных рынков для анализа.")
 
         valid_markets = []
-        for m in markets:
+        for m in all_markets:
             if not m.get("clobTokenIds") or not m.get("outcomePrices"):
                 continue
                 
             title = m.get("question", "")
+            
+            # ВРЕМЕННЫЙ ОТЛАДОЧНЫЙ ЛОГ: смотрим, видит ли бот строки в принципе
+            # Если в названии есть намек на игру, выведем его в лог
+            title_lower = title.lower()
+            if any(k in title_lower for k in ["vs", "match", "winner", "map", "team"]):
+                log.info(f"[RAW-MARKET-DEBUG] Потенциальный матч в выдаче: '{title}'")
+
             game = _detect_game(title)
             if not game:
-                continue  # Политика и экономика отсекаются здесь
+                continue  # Политика отсекается здесь
 
-            # Парсинг даты начала матча
             start_dt = None
             if m.get("gameStartTime"):
                 try:
@@ -174,7 +188,7 @@ def find_underdog(market: dict, max_prob: float, prices_cache: dict) -> dict | N
 
 
 def scan_markets():
-    """Основной рабочий цикл сканера с поддержкой live-матчей."""
+    """Основной рабочий цикл сканера."""
     log.info("[Scanner] Запуск сканирования киберспортивных рынков...")
     
     strategies = get_all_strategies()
@@ -220,24 +234,22 @@ def scan_markets():
             game = market["_game"]
             mtype = market["_mtype"]
 
-            # 1. Проверка по фильтрам игры и типа маркета
+            # Выводим инфу, что нашли игру, до фильтров стратегии
+            log.info(f"[MATCH-DEBUG] Бот нашел киберспортивный маркет: '{market['question']}' | Игра: {game} | Тип: {mtype}")
+
             if game.lower() not in allowed_games:
                 continue
             if mtype not in allowed_mtypes:
                 continue
 
-            # 2. Проверка времени (Теперь ЛАЙВ разрешен!)
             start_at = market["_start"]
             if start_at:
-                # Если матч уже идет (лайв), выводим отладочный лог, но НЕ скипаем его!
                 if start_at <= now_utc:
-                    log.info(f"[MATCH-DEBUG] Обработка LIVE-матча: '{market['question']}' | Игра: {game}")
-                
-                # Если матч начнется слишком нескоро (например, через 3 дня), скипаем
+                    log.info(f"[MATCH-DEBUG] Матч идет в ЛАЙВЕ: '{market['question']}'")
                 if start_at > now_utc + timedelta(hours=hours_before):
                     continue
 
-            # Добавляем/обновляем в дашборде
+            # Обновление мониторинга в БД
             any_underdog = find_underdog(market, max_prob=1.0, prices_cache=prices_cache)
             if any_underdog:
                 upsert_monitored_market(
@@ -250,16 +262,13 @@ def scan_markets():
                     match_starts_at= market["_start"].isoformat() if market["_start"] else None,
                 )
 
-            # Защита от дублей сделок
             if market_id in open_market_ids:
                 continue
 
-            # Проверка условий на жесткий вход по коэффициенту (< 15%)
             underdog = find_underdog(market, max_prob=max_prob, prices_cache=prices_cache)
             if not underdog:
                 continue
 
-            # Открываем сделку
             trade_id = open_trade(
                 strategy_id    = strategy_id,
                 market_id      = market_id,
@@ -274,7 +283,7 @@ def scan_markets():
             open_market_ids.add(market_id)
             entered += 1
             log.info(
-                f"[Scanner] ✅ Зафиксирован вход! {market.get('question', '')} | "
+                f"[Scanner] ✅ Вход в позицию: {market.get('question', '')} | "
                 f"{underdog['team']} @ {underdog['price']*100:.1f}% | trade #{trade_id}"
             )
 
