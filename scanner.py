@@ -1,4 +1,4 @@
-# scanner.py — целевой поиск киберспортивных рынков через теги Gamma API
+# scanner.py — глубокое сканирование пагинации Polymarket
 import logging
 import json
 import requests
@@ -49,71 +49,48 @@ def _get_market_type(market_title: str) -> str:
 
 
 def fetch_gamma_markets() -> list[dict]:
-    """Скачивает маркеты Polymarket, целенаправленно запрашивая категорию Esports."""
+    """Скачивает активные маркеты Polymarket с глубоким просмотром страниц (до 1000 штук)."""
     try:
         all_markets = []
         
-        # Делаем два запроса: один чисто по тегу Esports, второй — общий (на случай если тег забыли поставить)
-        # Запрос 1: Целевой киберспорт
-        try:
-            resp = requests.get(
-                f"{GAMMA_API}/markets",
-                params={
-                    "closed": "false",
-                    "resolved": "false",
-                    "active": "true",
-                    "limit": 100,
-                    "tag": "Esports"  # Фильтр самого Polymarket на уровне базы данных
-                },
-                timeout=15
-            )
-            if resp.status_code == 200:
-                all_markets.extend(resp.json())
-        except Exception as tag_err:
-            log.error(f"[Scanner] Не удалось получить рынки по тегу Esports: {tag_err}")
-
-        # Запрос 2: Берем еще 200 общих рынков с начала списка для подстраховки
-        for offset in [0, 100]:
-            resp = requests.get(
-                f"{GAMMA_API}/markets",
-                params={
-                    "closed": "false",
-                    "resolved": "false",
-                    "active": "true",
-                    "limit": 100,
-                    "offset": offset,
-                },
-                timeout=15
-            )
-            resp.raise_for_status()
-            chunk = resp.json()
-            if not chunk:
-                break
-            all_markets.extend(chunk)
-            
-        # Убираем дубликаты, если рынки пересеклись
-        unique_markets = {m["conditionId"]: m for m in all_markets if m.get("conditionId")}.values()
+        # Листаем глубоко (10 страниц по 100 рынков), чтобы выудить нишевый киберспорт
+        for offset in [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]:
+            try:
+                resp = requests.get(
+                    f"{GAMMA_API}/markets",
+                    params={
+                        "closed": "false",
+                        "resolved": "false",
+                        "active": "true",
+                        "limit": 100,
+                        "offset": offset,
+                    },
+                    timeout=15
+                )
+                resp.raise_for_status()
+                chunk = resp.json()
+                if not chunk:
+                    break
+                all_markets.extend(chunk)
+            except Exception as page_err:
+                log.error(f"[Scanner] Ошибка загрузки страницы с offset {offset}: {page_err}")
+                continue
         
-        log.info(f"[Scanner] Gamma API суммарно вернул {len(unique_markets)} активных рынков после мёрджа.")
+        log.info(f"[Scanner] Gamma API суммарно вернул {len(all_markets)} активных рынков для анализа.")
 
         valid_markets = []
-        for m in unique_markets:
-            title = m.get("question", "")
-            title_lower = title.lower()
-            
-            # Проверяем структуру
+        for m in all_markets:
             if not m.get("clobTokenIds") or not m.get("outcomePrices"):
                 continue
-
+                
+            title = m.get("question", "")
             game = _detect_game(title)
             
-            # Пишем в лог всё, что хоть как-то похоже на киберспорт или прилетело по тегу
-            is_esport_suspect = any(x in title_lower for x in ["vs", "map", "esl", "pgl", "iem", "dota", "cs2", "valorant", "major", "league"])
-            if is_esport_suspect:
-                log.info(f"[MATCH-DEBUG] Рынок попал в анализ: '{title}' | Распознан как игра: {game}")
-
             if not game:
                 continue
+
+            # Если игра определилась — выведем лог, подсветим находку
+            log.info(f"[MATCH-DEBUG] Найдено киберспортивное событие: '{title}' -> {game}")
 
             start_dt = None
             if m.get("gameStartTime"):
